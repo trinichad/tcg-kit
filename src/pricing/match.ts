@@ -576,6 +576,34 @@ export function createMatch(_ctx: PricingCtx, deps: { csv: TcgCsv; live: TcgLive
    * but product URLs carry a name slug — search for the slug words and pick
    * the hit with the exact product id.
    */
+  /**
+   * A product by id when its set is already known — a scan hit (the index
+   * carries groupId) or a CSV "product id" column. No search: one cached
+   * tcgcsv products call + the group list. Null when the product isn't in
+   * that group (wrong group, or a set tcgcsv hasn't published yet).
+   */
+  async function matchFromGroup(productId: number, categoryId: number, groupId: number): Promise<ProductMatch | null> {
+    const row = await csv.productRow(categoryId, groupId, productId);
+    if (!row) return null;
+    const group = (await csv.groups(categoryId)).find((g) => g.groupId === groupId);
+    const subTypes = await csv.subTypesFor(categoryId, groupId, productId);
+    const split = splitProductName(row.name);
+    return {
+      productId,
+      name: split.name || row.cleanName || row.name,
+      categoryId,
+      groupId,
+      groupName: group?.name ?? '',
+      groupCode: group?.abbreviation || undefined,
+      number: extValue(row, 'Number') || split.number,
+      rarity: extValue(row, 'Rarity'),
+      imageUrl: row.imageUrl || cdnImage(productId),
+      url: row.url || productUrl(productId),
+      subTypes: subTypes.length ? subTypes : [{ name: 'Market', marketPrice: null }],
+      score: 1,
+    };
+  }
+
   async function matchFromProductId(productId: number, slug?: string): Promise<ProductMatch | null> {
     if (!slug) return null;
     const hits = await live.searchProducts(slug.replace(/-/g, ' '), undefined, 24);
@@ -635,5 +663,5 @@ export function createMatch(_ctx: PricingCtx, deps: { csv: TcgCsv; live: TcgLive
     return { results };
   }
 
-  return { resolveCard, manualSearch, enrichMatch, lightMatch };
+  return { resolveCard, manualSearch, enrichMatch, lightMatch, matchFromGroup };
 }

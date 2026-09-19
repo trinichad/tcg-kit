@@ -47,6 +47,7 @@ with `price` / `priceAll` / `priceMany` — deterministic and cheap.
 | Method | Purpose |
 |---|---|
 | `search(q, game?)` | free text, a tcgplayer.com URL, or a bare product id |
+| `productById(productId, categoryId, groupId)` | a product whose set is known (scan hit, CSV id column) — one cached tcgcsv call, no search; null when it is not in that group |
 | `resolveCard(q)` / `resolveMany(qs)` | name / set / number / printing → `ProductMatch` (name 0.5 · number 0.35 · set 0.15, with the set-code collision guards) |
 | `price(ref)` / `priceAll(ref)` | one condition / all five, by `productId` + `subType` |
 | `priceMany(refs)` | bulk; respects provider pacing; never throws per item |
@@ -126,4 +127,4 @@ unreleased sets skipped, identical-image clusters dropped, a 404'd set keeps its
 `manifest.json` byte-identical — are pinned by `npm run index-check` (38 offline assertions).
 
 ## Status
-**v0.1.0 — Phase 1 complete.** typecheck clean · 82 unit tests · canary 26 pass / 0 fail / 2 skip (sports fixtures need a PriceCharting token) · probes LINK GREEN · recognizer integration test distance 0 on real card images. Consumers: the Holo Hunting site (Phase 2). Design: Holo repo `architecture/rip-game-backoffice.md`.
+**v0.1.1** — adds `productById`. **v0.1.0 — Phase 1 complete.** typecheck clean · 82 unit tests · canary 26 pass / 0 fail / 2 skip (sports fixtures need a PriceCharting token) · probes LINK GREEN · recognizer integration test distance 0 on real card images. Consumers: the Holo Hunting site (Phase 2). Design: Holo repo `architecture/rip-game-backoffice.md`.

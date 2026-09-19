@@ -589,6 +589,12 @@ interface TcgPricing {
     }): Promise<ResolveResult[]>;
     /** Add catalog data (printings, canonical number/rarity/image) to a match. */
     enrich(match: ProductMatch, setCode?: string): Promise<ProductMatch>;
+    /**
+     * A product by id when its set is known (a scan hit carries `groupId`; the
+     * card index maps any productId to its group). One cached tcgcsv call, no
+     * search. Null when the product isn't in that group.
+     */
+    productById(productId: number, categoryId: number, groupId: number): Promise<ProductMatch | null>;
     /** One product, one printing, one condition. */
     price(ref: PriceRef): Promise<PriceQuote>;
     /** All five conditions, cross-checked against each other. */

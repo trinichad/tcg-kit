@@ -848,6 +848,27 @@ function createMatch(_ctx, deps) {
       candidates
     };
   }
+  async function matchFromGroup(productId, categoryId, groupId) {
+    const row = await csv.productRow(categoryId, groupId, productId);
+    if (!row) return null;
+    const group = (await csv.groups(categoryId)).find((g) => g.groupId === groupId);
+    const subTypes = await csv.subTypesFor(categoryId, groupId, productId);
+    const split = splitProductName(row.name);
+    return {
+      productId,
+      name: split.name || row.cleanName || row.name,
+      categoryId,
+      groupId,
+      groupName: group?.name ?? "",
+      groupCode: group?.abbreviation || void 0,
+      number: extValue(row, "Number") || split.number,
+      rarity: extValue(row, "Rarity"),
+      imageUrl: row.imageUrl || cdnImage(productId),
+      url: row.url || productUrl(productId),
+      subTypes: subTypes.length ? subTypes : [{ name: "Market", marketPrice: null }],
+      score: 1
+    };
+  }
   async function matchFromProductId(productId, slug) {
     if (!slug) return null;
     const hits = await live.searchProducts(slug.replace(/-/g, " "), void 0, 24);
@@ -889,7 +910,7 @@ function createMatch(_ctx, deps) {
     const results = await Promise.all(pool.slice(0, 10).map((h) => lightMatch(h, 0)));
     return { results };
   }
-  return { resolveCard, manualSearch, enrichMatch, lightMatch };
+  return { resolveCard, manualSearch, enrichMatch, lightMatch, matchFromGroup };
 }
 
 // src/pricing/providers/pricecharting.ts
@@ -1984,6 +2005,7 @@ function createPricing(config = {}) {
       );
     },
     enrich: (match, setCode) => matcher.enrichMatch(match, setCode),
+    productById: (productId, categoryId, groupId) => matcher.matchFromGroup(productId, categoryId, groupId),
     price: (ref) => pricer.quote(ref),
     priceAll: (ref) => pricer.quoteAll(ref),
     /**

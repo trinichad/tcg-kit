@@ -1,6 +1,6 @@
 {
   "name": "@holo/tcg-kit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "TCG card pricing, recognition, and catalog kit \u2014 reusable across Holo Hunting apps.",
   "private": true,
   "type": "module",
