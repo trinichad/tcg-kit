@@ -1,0 +1,35 @@
+# Scheduled correctness monitor. Runs the canary (scripts/canary.ts) on a cron
+# and fails the job on any regression — a failed scheduled workflow emails the
+# repo owner, so a silent break (wrong prices, broken graded parser,
+# mis-identification) becomes a loud alert. No paid service required.
+#
+# `continue-on-error: false` is the whole point: a canary that is allowed to go
+# green on failure is decoration.
+#
+# Point it at a deployment by setting the repo variable CANARY_BASE
+# (Settings → Secrets and variables → Actions → Variables); scripts/canary.ts
+# decides what to do when it is unset.
+
+name: canary
+
+on:
+  schedule:
+    - cron: '17 13 * * *' # daily ~13:17 UTC
+  workflow_dispatch: {} # allow manual runs from the Actions tab
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - name: Run correctness canary
+        continue-on-error: false
+        env:
+          CANARY_BASE: ${{ vars.CANARY_BASE }}
+        run: npm run canary

@@ -1,0 +1,71 @@
+# Keeps the card index current. Every Monday (and on demand from the Actions
+# tab), crawl TCGplayer's catalogue via tcgcsv, fingerprint only the cards
+# added since the last update, and — if anything changed — commit the new index
+# files. Consumers pick the new cards up by pulling the kit and re-running
+# `scripts/copy-index.ts`.
+#
+# The job summary (and the commit message) says exactly what was added, per
+# catalogue, plus which sets are listed but not released yet.
+#
+# The index lives in data/cardindex/ and is committed data, not build output:
+# nothing here runs `npm run build`.
+
+name: update-index
+
+on:
+  schedule:
+    - cron: '23 9 * * 1' # Mondays ~09:23 UTC — new sets mostly release Fridays
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-index
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - name: Fetch new cards
+        run: npm run update-index -- --report-dir .tmp/index-report
+      - name: Job summary
+        if: always()
+        run: cat .tmp/index-report/report.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+      - name: Commit the updated index
+        # Vercel only builds commits whose author is a member of the project's
+        # team: a bot identity here left every index deployment BLOCKED — the
+        # cards reached GitHub but never the phones. The repository owner
+        # authors the commit; the message says the workflow made it.
+        #
+        # (This repo has no Vercel of its own — the kit is a library. The fix
+        # stays because the apps that consume it do deploy that way, and a
+        # bot-authored commit here propagates into their history.)
+        env:
+          AUTHOR_NAME: ${{ github.repository_owner }}
+          AUTHOR_EMAIL: ${{ github.repository_owner_id }}+${{ github.repository_owner }}@users.noreply.github.com
+        run: |
+          git add data/cardindex
+          if git diff --cached --quiet; then
+            echo "no index changes to commit"
+            exit 0
+          fi
+          git config user.name "$AUTHOR_NAME"
+          git config user.email "$AUTHOR_EMAIL"
+          {
+            cat .tmp/index-report/title.txt
+            echo
+            cat .tmp/index-report/report.md
+            echo
+            echo "Committed by the update-index workflow."
+          } > .tmp/index-report/commit.txt
+          git commit -F .tmp/index-report/commit.txt
+          git push

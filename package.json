@@ -1,16 +1,35 @@
 {
   "name": "@holo/tcg-kit",
   "version": "0.1.0",
-  "description": "TCG card pricing, recognition, and catalog kit — reusable across Holo Hunting apps.",
+  "description": "TCG card pricing, recognition, and catalog kit \u2014 reusable across Holo Hunting apps.",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=20" },
-  "exports": {
-    "./pricing":   { "types": "./dist/pricing/index.d.ts",   "import": "./dist/pricing/index.js",   "require": "./dist/pricing/index.cjs" },
-    "./recognize": { "types": "./dist/recognize/index.d.ts", "import": "./dist/recognize/index.js", "require": "./dist/recognize/index.cjs" },
-    "./catalog":   { "types": "./dist/catalog/index.d.ts",   "import": "./dist/catalog/index.js",   "require": "./dist/catalog/index.cjs" }
+  "engines": {
+    "node": ">=20"
   },
-  "files": ["dist", "data"],
+  "exports": {
+    "./pricing": {
+      "types": "./dist/pricing/index.d.ts",
+      "import": "./dist/pricing/index.js",
+      "require": "./dist/pricing/index.cjs"
+    },
+    "./recognize": {
+      "types": "./dist/recognize/index.d.ts",
+      "import": "./dist/recognize/index.js",
+      "require": "./dist/recognize/index.cjs"
+    },
+    "./catalog": {
+      "types": "./dist/catalog/index.d.ts",
+      "import": "./dist/catalog/index.js",
+      "require": "./dist/catalog/index.cjs"
+    },
+    "./data/*": "./data/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "data"
+  ],
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
@@ -18,7 +37,9 @@
     "canary": "tsx scripts/canary.ts",
     "battery": "tsx scripts/battery.ts",
     "build-index": "tsx scripts/build-index.ts",
-    "update-index": "tsx scripts/build-index.ts --report-dir .tmp/index-report"
+    "update-index": "tsx scripts/build-index.ts --report-dir .tmp/index-report",
+    "index-check": "tsx scripts/index-check.ts",
+    "copy-index": "tsx scripts/copy-index.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
