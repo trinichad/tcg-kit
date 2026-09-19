@@ -1,0 +1,8 @@
+node_modules/
+.tmp/
+.env
+.env.*
+coverage/
+*.log
+.DS_Store
+# dist/ and data/ are committed on purpose: consumers install from git.
