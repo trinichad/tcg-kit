@@ -39,7 +39,9 @@
     "build-index": "tsx scripts/build-index.ts",
     "update-index": "tsx scripts/build-index.ts --report-dir .tmp/index-report",
     "index-check": "tsx scripts/index-check.ts",
-    "copy-index": "tsx scripts/copy-index.ts"
+    "copy-index": "tsx scripts/copy-index.ts",
+    "probes": "tsx scripts/probes.ts",
+    "demo": "tsx scripts/demo-price.ts"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
