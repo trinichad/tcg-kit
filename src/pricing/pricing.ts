@@ -505,13 +505,14 @@ export function finish(a: Assessment, corroboration: number | null): Priced {
     const capped = askCap != null && price > askCap;
     if (capped) price = round2(askCap as number);
     // Asks carry the price when the solds are less than half a fresh sale's
-    // worth and the asks outweigh them — unless the two agree anyway, in
-    // which case the price is simply what it sells for.
+    // worth and the asks outweigh them and sit materially ABOVE the solds —
+    // that is the estimate worth flagging. Asks below the solds are a cap,
+    // not a guess: the card can be bought for that, so the number is exact.
     const askLed =
       soldLevel == null ||
       (askWeight > soldWeight &&
         soldWeight < 0.5 &&
-        Math.abs((askLevel as number) - soldLevel) >= soldLevel * 0.05);
+        (askLevel as number) - soldLevel >= soldLevel * 0.05);
     const what = fromTcg ? `TCGplayer's ${condition} market` : plural(salesUsed, `${condition} sold`);
     const age = newestSaleDays == null ? '' : fromTcg && newestSaleDays >= STALE_MARKET_AGE_DAYS ? ' (no sale in the last month)' : ` (newest ${fmtAge(newestSaleDays)})`;
     if (soldLevel == null) {

@@ -1519,7 +1519,7 @@ function finish(a, corroboration) {
     price = round2(blendLevels(levels));
     const capped = askCap != null && price > askCap;
     if (capped) price = round2(askCap);
-    const askLed = soldLevel == null || askWeight > soldWeight && soldWeight < 0.5 && Math.abs(askLevel - soldLevel) >= soldLevel * 0.05;
+    const askLed = soldLevel == null || askWeight > soldWeight && soldWeight < 0.5 && askLevel - soldLevel >= soldLevel * 0.05;
     const what = fromTcg ? `TCGplayer's ${condition} market` : plural(salesUsed, `${condition} sold`);
     const age = newestSaleDays == null ? "" : fromTcg && newestSaleDays >= STALE_MARKET_AGE_DAYS ? " (no sale in the last month)" : ` (newest ${fmtAge(newestSaleDays)})`;
     if (soldLevel == null) {

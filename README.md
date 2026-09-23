@@ -64,7 +64,7 @@ solds, outliers outside 0.4×–3× dropped) → `sales_adj` → `market` / `mar
 anchored rung and clamped between trusted neighbours; otherwise the ladder is forced monotonic by
 weighted isotonic regression.
 
-**The metric (v0.1.2, same engine as BinderPricer `ad9350c`):** sold evidence fades with age — a sale
+**The metric (v0.1.3, same engine as BinderPricer `ad9350c`):** sold evidence fades with age — a sale
 today is a full vote, two weeks old half, a month a quarter (`SALE_HALF_LIFE_DAYS`); TCGplayer's SKU
 market is weighed by the sales behind it (its daily buckets), so a market with no sale in the month is a
 quarter-vote number. It is blended in ratio terms with the cheapest live ask in that condition + printing
