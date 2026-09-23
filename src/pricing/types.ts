@@ -109,8 +109,9 @@ export interface PriceQuote {
    * market_adj – market price adjusted for condition
    * graded     – per-grade market value from eBay solds (PriceCharting)
    * ebay       – median of current eBay live ASKS (fallback when no sold guide)
-   * ask        – current TCGplayer ask level, used when a thin sold sample is
-   *              implausibly far below the live asks (bad-data guard)
+   * ask        – current TCGplayer ask level: the solds (or TCGplayer's
+   *              market) were too old or too few to outweigh the live asks,
+   *              or looked like bad data
    */
   source:
     | 'tcg_market'
@@ -143,6 +144,28 @@ export interface PriceQuote {
   listedMid?: number | null;
   /** Set when the slab's cert was verified against PSA's records. */
   psa?: PsaVerify;
+  /** How a raw quote was put together (absent on graded/eBay quotes). */
+  basis?: PriceBasis;
+}
+
+/**
+ * The evidence behind a raw price. Solds fade with age (a sale today weighs
+ * 1, halving every 14 days) and are blended with the cheapest live ask, so
+ * a consumer can say how old the sales are and what the market is asking now.
+ */
+export interface PriceBasis {
+  /** The sold level: TCGplayer's own market for the SKU, or the recency-weighted median of the solds used. */
+  soldLevel: number | null;
+  /** Total recency weight of the solds behind it (3 fresh sales ≈ 3, one month-old sale ≈ 0.25). */
+  soldWeight: number;
+  /** Age in days of the newest sale behind the sold level. */
+  newestSaleDays: number | null;
+  /** Cheapest live ask in this condition+printing (item price, no shipping). */
+  askFloor: number | null;
+  /** Weight the asks carried in the blend (1 = as much as one fresh sale). */
+  askWeight: number;
+  /** The price is never above this: the cheapest delivered ask (price + shipping), when it is real money. */
+  askCap: number | null;
 }
 
 /** Authoritative slab identity from PSA's cert-verification API. */
@@ -296,4 +319,6 @@ export interface PricingConfig {
   sku?: { minIntervalMs?: number; cooldownMs?: number };
   /** Inject a fetch (proxy, instrumentation, tests). Defaults to global fetch. */
   fetch?: typeof fetch;
+  /** Inject the clock sale ages are measured against (tests). Defaults to Date.now. */
+  now?: () => number;
 }

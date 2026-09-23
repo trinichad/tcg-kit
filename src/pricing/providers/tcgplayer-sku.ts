@@ -20,6 +20,12 @@ export interface SkuMarket {
   sold: number;
   /** Bucket day, YYYY-MM-DD. */
   asOf: string;
+  /**
+   * Days in the month window on which copies sold, newest first. This is
+   * how old the market price really is: a market with no sale in the window
+   * is a month-old number at best, and the pricer weighs it accordingly.
+   */
+  sales: { date: string; quantity: number }[];
 }
 
 /** printing|condition → market. Keys use the lower-cased printing name. */
@@ -39,7 +45,7 @@ interface RawSku {
   condition?: string;
   language?: string;
   totalQuantitySold?: number | string;
-  buckets?: { marketPrice?: number | string; bucketStartDate?: string }[];
+  buckets?: { marketPrice?: number | string; quantitySold?: number | string; bucketStartDate?: string }[];
 }
 
 const normVariant = (s: unknown): string =>
@@ -169,6 +175,12 @@ export function createSkuMarkets(ctx: PricingCtx) {
           market: Number(latest.marketPrice),
           sold: Number(s.totalQuantitySold ?? 0),
           asOf: String(latest.bucketStartDate ?? '').slice(0, 10),
+          sales: (s.buckets ?? [])
+            .filter((b) => Number(b.quantitySold) > 0)
+            .map((b) => ({
+              date: String(b.bucketStartDate ?? '').slice(0, 10),
+              quantity: Number(b.quantitySold),
+            })),
         };
       }
       return out;

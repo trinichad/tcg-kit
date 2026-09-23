@@ -225,11 +225,30 @@ export {
 } from './match';
 export {
   ALL_CONDITIONS,
+  ASK_DISCOUNT,
+  ASK_TRUST_FROM,
   CONDITION_ID,
   CONDITION_NAME,
   FACTOR,
+  SALE_HALF_LIFE_DAYS,
+  STALE_MARKET_AGE_DAYS,
+  TRUSTED,
+  askFloorOf,
+  assembleLadder,
+  assess,
+  blendLevels,
+  corroborationFor,
   enforceMonotonic,
+  finish,
+  ladderFromEvidence,
+  priceFromEvidence,
+  recencyWeight,
+  saleAgeDays,
+  weightedMedian,
   withoutOutliers,
+  type Assessment,
+  type Priced,
+  type QuoteEvidence,
 } from './pricing';
 export { saneMarketPrice, extValue, gameForProductLine } from './providers/tcgcsv';
 export { gradeLabelFor, scorePcHit } from './providers/pricecharting';
@@ -255,6 +274,7 @@ export type {
   GroupPrice,
   HealthResult,
   ListingSample,
+  PriceBasis,
   PriceConfidence,
   PriceQuote,
   PriceRef,

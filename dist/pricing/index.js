@@ -143,7 +143,8 @@ function createContext(config = {}) {
     // Politeness gate. PriceCharting returns 429 to a burst of rapid scrapes —
     // a slab-heavy page fires several graded lookups at once, and without this
     // the later ones silently degrade to "set price manually".
-    limitPriceCharting: createLimiter(config.concurrency?.pricecharting ?? 2)
+    limitPriceCharting: createLimiter(config.concurrency?.pricecharting ?? 2),
+    now: config.now ?? Date.now
   };
 }
 
@@ -1324,11 +1325,334 @@ var CODE_BY_NAME = Object.fromEntries(
 var norm = (s) => s.toLowerCase().replace(/\s+/g, " ").trim();
 var ALL_CONDITIONS = Object.keys(CONDITION_ID);
 var TRUSTED = /* @__PURE__ */ new Set(["tcg_market", "sales", "ask"]);
-function enforceMonotonic(quotes) {
-  const blocks = [];
-  for (const q of quotes) {
+var SALE_HALF_LIFE_DAYS = 14;
+var STALE_MARKET_AGE_DAYS = 30;
+var ASK_DISCOUNT = 0.9;
+var ASK_FULL_WEIGHT_AT = 3;
+var ASK_TRUST_FROM = 2;
+var BAD_SALE_BELOW_ASK = 0.4;
+var DAY_MS = 864e5;
+function saleAgeDays(date, now) {
+  const t = Date.parse(date);
+  return Number.isFinite(t) ? Math.max(0, (now - t) / DAY_MS) : SALE_HALF_LIFE_DAYS;
+}
+var recencyWeight = (ageDays) => 0.5 ** (ageDays / SALE_HALF_LIFE_DAYS);
+function weightedMedian(items) {
+  const sorted = [...items].sort((a, b) => a.value - b.value);
+  const half = sorted.reduce((sum, i) => sum + i.weight, 0) / 2;
+  let acc = 0;
+  for (let i = 0; i < sorted.length; i++) {
+    acc += sorted[i].weight;
+    if (acc > half + 1e-9) return sorted[i].value;
+    if (Math.abs(acc - half) <= 1e-9) {
+      return i + 1 < sorted.length ? (sorted[i].value + sorted[i + 1].value) / 2 : sorted[i].value;
+    }
+  }
+  return sorted[sorted.length - 1].value;
+}
+function askFloorOf(listings) {
+  const ps = listings.map((l) => l.price).sort((a, b) => a - b);
+  if (!ps.length) return null;
+  return ps.length >= 2 && ps[0] < ps[1] / 10 ? ps[1] : ps[0];
+}
+function blendLevels(levels) {
+  const total = levels.reduce((sum, l) => sum + l.weight, 0);
+  if (levels.every((l) => l.value > 0)) {
+    return Math.exp(levels.reduce((sum, l) => sum + l.weight * Math.log(l.value), 0) / total);
+  }
+  return levels.reduce((sum, l) => sum + l.weight * l.value, 0) / total;
+}
+var fmtAge = (days) => days < 1 ? "today" : days < 2 ? "yesterday" : `${Math.round(days)} days ago`;
+var plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+function variantMatcher(subType) {
+  const wantVariant = norm(subType);
+  return (v) => !wantVariant || wantVariant === "market" || norm(v) === wantVariant;
+}
+function withoutOutliers(sales, valueOf) {
+  if (sales.length < 4) return sales;
+  const centre = weightedMedian(sales.map((s) => ({ value: valueOf(s), weight: 1 })));
+  if (!(centre > 0)) return sales;
+  const kept = sales.filter((s) => valueOf(s) >= centre * 0.4 && valueOf(s) <= centre * 3);
+  return kept.length >= 2 ? kept : sales;
+}
+function assess(params, ev) {
+  const { condition } = params;
+  const subType = params.subType ?? "";
+  const n = Math.min(Math.max(params.salesCount || 3, 1), 10);
+  const variantOk = variantMatcher(subType);
+  const weightOf = (s) => recencyWeight(saleAgeDays(s.date, ev.now));
+  const newestOf = (sales) => Math.min(...sales.map((s) => saleAgeDays(s.date, ev.now)));
+  let soldLevel = null;
+  let soldWeight = 0;
+  let salesUsed = 0;
+  let newestSaleDays = null;
+  let source = "none";
+  let exactUsed = false;
+  let shown = [];
+  let asOf;
+  const exact = ev.exact.filter((s) => variantOk(s.variant) && s.condition === CONDITION_NAME[condition]);
+  if (ev.market && ev.market.market > 0) {
+    const units = [];
+    for (const day of ev.market.sales ?? []) {
+      for (let i = 0; i < day.quantity && units.length < n; i++) units.push(saleAgeDays(day.date, ev.now));
+    }
+    soldLevel = ev.market.market;
+    soldWeight = units.length ? units.reduce((sum, age) => sum + recencyWeight(age), 0) : recencyWeight(STALE_MARKET_AGE_DAYS);
+    salesUsed = ev.market.sold;
+    newestSaleDays = units.length ? Math.min(...units) : STALE_MARKET_AGE_DAYS;
+    source = "tcg_market";
+    exactUsed = true;
+    asOf = ev.market.asOf;
+    shown = exact;
+  } else if (exact.length) {
+    const take = withoutOutliers(exact, (s) => s.price).slice(0, n);
+    soldLevel = weightedMedian(take.map((s) => ({ value: s.price, weight: weightOf(s) })));
+    soldWeight = take.reduce((sum, s) => sum + weightOf(s), 0);
+    salesUsed = take.length;
+    newestSaleDays = newestOf(take);
+    source = "sales";
+    exactUsed = true;
+    shown = exact;
+  } else {
+    const usable = ev.mixed.filter((s) => variantOk(s.variant));
+    shown = usable;
+    const known = usable.filter((s) => CODE_BY_NAME[s.condition]);
+    if (known.length >= 2) {
+      const nmEquivalent = (s) => s.price / FACTOR[CODE_BY_NAME[s.condition]];
+      const take = withoutOutliers(known, nmEquivalent).slice(0, Math.max(n, 5));
+      soldLevel = weightedMedian(
+        take.map((s) => ({ value: nmEquivalent(s) * FACTOR[condition], weight: weightOf(s) }))
+      );
+      soldWeight = take.reduce((sum, s) => sum + weightOf(s), 0) / 2;
+      salesUsed = take.length;
+      newestSaleDays = newestOf(take);
+      source = "sales_adj";
+    }
+  }
+  let marketPrice = null;
+  let publishedMarket = null;
+  let marketNote;
+  let listedLow = null;
+  let listedMid = null;
+  const wantVariant = norm(subType);
+  const row = ev.rows.find((r) => norm(r.subTypeName) === wantVariant) ?? ev.rows.find((r) => r.marketPrice != null);
+  if (row) {
+    const sane = saneMarketPrice(row);
+    marketPrice = sane.price;
+    publishedMarket = row.marketPrice != null && row.marketPrice > 0 && row.marketPrice !== 1e5 ? row.marketPrice : null;
+    listedLow = row.lowPrice != null && row.lowPrice !== 1e5 ? row.lowPrice : null;
+    listedMid = row.midPrice != null && row.midPrice !== 1e5 ? row.midPrice : null;
+    if (sane.adjusted) {
+      marketNote = `TCGplayer's published market price ($${row.marketPrice}) looks stale for this printing \u2014 using current listing prices instead`;
+    }
+  }
+  const listings = ev.listings.filter((l) => variantOk(l.variant) && l.condition === CONDITION_NAME[condition] && l.price < 1e5).slice(0, 5);
+  const askFloor = askFloorOf(listings);
+  const askWeight = askFloor == null ? 0 : Math.min(listings.length, ASK_FULL_WEIGHT_AT) / ASK_FULL_WEIGHT_AT * Math.min(1, askFloor / ASK_TRUST_FROM);
+  const delivered = askFloorOf(listings.map((l) => ({ price: l.price + (l.shipping ?? 0) })));
+  const askCap = delivered != null && delivered >= ASK_TRUST_FROM ? delivered : null;
+  return {
+    params,
+    soldLevel,
+    soldWeight,
+    salesUsed,
+    newestSaleDays,
+    exactUsed,
+    source,
+    shown,
+    marketPrice,
+    publishedMarket,
+    marketNote,
+    listedLow,
+    listedMid,
+    listings,
+    askFloor,
+    askWeight,
+    askCap,
+    asOf
+  };
+}
+function corroborationFor(a, others) {
+  const factor = FACTOR[a.params.condition];
+  const solds = others.filter((o) => o.exactUsed && o.soldLevel != null).map((o) => ({
+    value: o.soldLevel / FACTOR[o.params.condition],
+    weight: Math.max(o.soldWeight, 1e-6)
+  }));
+  if (solds.length) return weightedMedian(solds) * factor;
+  return a.publishedMarket == null ? null : a.publishedMarket * factor;
+}
+function finish(a, corroboration) {
+  const { productId, condition } = a.params;
+  const subType = a.params.subType ?? "";
+  let { soldLevel, soldWeight, salesUsed, newestSaleDays, source, askWeight, askCap } = a;
+  const { askFloor, marketPrice, listings } = a;
+  const fromTcg = a.source === "tcg_market";
+  let wishNote;
+  if (askFloor != null && listings.length === 1 && corroboration != null && askFloor > corroboration * 3) {
+    wishNote = `the one live ${condition} ask ($${round2(askFloor)}) is far above what other conditions sell for \u2014 ignored`;
+    askWeight = 0;
+    askCap = null;
+  }
+  let guardNote;
+  if (soldLevel != null && askFloor != null && askFloor > 50 && salesUsed <= 2 && soldLevel < askFloor * BAD_SALE_BELOW_ASK && (corroboration == null || soldLevel < corroboration * BAD_SALE_BELOW_ASK)) {
+    guardNote = `ignored a lone $${round2(soldLevel)} figure far below the $${round2(askFloor)} live asks \u2014 priced at the current ask level`;
+    soldLevel = null;
+    soldWeight = 0;
+    salesUsed = 0;
+    newestSaleDays = null;
+  }
+  const askLevel = askFloor == null || askWeight <= 0 ? null : Math.max(askFloor * ASK_DISCOUNT, Math.min(askFloor, soldLevel ?? 0));
+  if (soldLevel != null && askLevel != null && askLevel > 0) {
+    const freshness = Math.min(1, soldWeight);
+    askWeight *= 1 - freshness * (1 - Math.min(1, soldLevel / askLevel));
+  }
+  let price = null;
+  let estimated = false;
+  let blendNote;
+  const weight = soldWeight + askWeight;
+  if (soldLevel != null || askLevel != null) {
+    const levels = [];
+    if (soldLevel != null) levels.push({ value: soldLevel, weight: soldWeight });
+    if (askLevel != null) levels.push({ value: askLevel, weight: askWeight });
+    price = round2(blendLevels(levels));
+    const capped = askCap != null && price > askCap;
+    if (capped) price = round2(askCap);
+    const askLed = soldLevel == null || askWeight > soldWeight && soldWeight < 0.5 && Math.abs(askLevel - soldLevel) >= soldLevel * 0.05;
+    const what = fromTcg ? `TCGplayer's ${condition} market` : plural(salesUsed, `${condition} sold`);
+    const age = newestSaleDays == null ? "" : fromTcg && newestSaleDays >= STALE_MARKET_AGE_DAYS ? " (no sale in the last month)" : ` (newest ${fmtAge(newestSaleDays)})`;
+    if (soldLevel == null) {
+      source = "ask";
+      blendNote = `no ${condition} solds of this printing on record \u2014 priced just under the cheapest live ask ($${round2(askFloor)})`;
+    } else if (askLed) {
+      source = "ask";
+      blendNote = `${what}${age} at $${round2(soldLevel)} \u2014 too old or too few to outweigh the live ${condition} asks from $${round2(askFloor)}`;
+    } else if (capped) {
+      blendNote = `${what}${age} at $${round2(soldLevel)} sits above the cheapest live ${condition} ask \u2014 held at that ask ($${round2(askCap)}${askCap !== askFloor ? " delivered" : ""}) so it can't be beaten online`;
+    } else if (askLevel != null && Math.abs(price - soldLevel) >= soldLevel * 0.05) {
+      blendNote = `${what}${age} at $${round2(soldLevel)}, live ${condition} asks from $${round2(askFloor)} \u2014 blended`;
+    }
+    estimated = !TRUSTED.has(source) || source === "ask";
+  } else if (marketPrice != null) {
+    price = round2(marketPrice * FACTOR[condition]);
+    source = condition === "NM" ? "market" : "market_adj";
+    estimated = condition !== "NM";
+  }
+  const basis = {
+    soldLevel: soldLevel == null ? null : round2(soldLevel),
+    soldWeight: round2(soldWeight),
+    newestSaleDays: newestSaleDays == null ? null : Math.round(newestSaleDays),
+    askFloor: askFloor == null ? null : round2(askFloor),
+    askWeight: round2(askWeight),
+    askCap: askCap == null ? null : round2(askCap)
+  };
+  return {
+    quote: {
+      productId,
+      subType,
+      condition,
+      price,
+      source,
+      estimated,
+      salesUsed,
+      marketPrice,
+      sales: a.shown.slice(0, 5),
+      url: `https://www.tcgplayer.com/product/${productId}`,
+      asOf: a.asOf,
+      note: guardNote ?? blendNote ?? wishNote ?? a.marketNote,
+      listings,
+      listedLow: a.listedLow,
+      listedMid: a.listedMid,
+      basis
+    },
+    weight,
+    anchor: price != null && (a.exactUsed || askWeight > 0)
+  };
+}
+function priceFromEvidence(params, ev) {
+  const a = assess(params, ev);
+  return finish(a, corroborationFor(a, []));
+}
+function ladderFromEvidence(base, evidence) {
+  const assessed = ALL_CONDITIONS.map((condition) => assess({ ...base, condition }, evidence[condition]));
+  const priced = assessed.map(
+    (a) => finish(
+      a,
+      corroborationFor(
+        a,
+        assessed.filter((o) => o !== a)
+      )
+    )
+  );
+  return assembleLadder(priced);
+}
+function assembleLadder(priced) {
+  const anchors = priced.filter((p) => p.anchor && p.quote.price != null);
+  if (anchors.length) {
+    const salesUsed = anchors.reduce((a, p) => a + p.quote.salesUsed, 0);
+    priced.forEach((p, i) => {
+      if (p.anchor) return;
+      const q = p.quote;
+      const above = priced.slice(0, i).reverse().find((o) => o.anchor && o.quote.price != null);
+      const below = priced.slice(i + 1).find((o) => o.anchor && o.quote.price != null);
+      const ref = above ?? below;
+      let price = ref.quote.price * FACTOR[q.condition] / FACTOR[ref.quote.condition];
+      if (above) price = Math.min(price, above.quote.price);
+      if (below) price = Math.max(price, below.quote.price);
+      q.price = round2(price);
+      q.estimated = true;
+      q.salesUsed = ref.quote.source === "tcg_market" ? 0 : salesUsed;
+      if (ref.quote.source === "tcg_market") {
+        q.source = "scaled";
+        q.note = `no TCGplayer market for ${q.condition} \u2014 scaled from its ${ref.quote.condition} market`;
+      } else {
+        q.source = "sales_adj";
+        q.note = `no recent ${q.condition} solds of this printing \u2014 scaled from this printing's price in other conditions`;
+      }
+      p.weight = 0.5;
+    });
+  }
+  const hasTcg = priced.some((p) => p.quote.source === "tcg_market" && p.quote.price != null);
+  if (!hasTcg) {
+    enforceMonotonic(priced);
+  } else {
+    let ceiling2 = Infinity;
+    for (const p of priced) {
+      const q = p.quote;
+      if (q.price == null) continue;
+      if (q.source === "tcg_market") {
+        ceiling2 = q.price;
+        continue;
+      }
+      if (q.price > ceiling2) {
+        q.price = round2(ceiling2);
+        q.note = `held under TCGplayer's price for a cleaner grade ($${round2(ceiling2)})`;
+      }
+    }
+  }
+  let ceiling = Infinity;
+  let ceilingFrom = null;
+  for (const p of priced) {
+    const q = p.quote;
     if (q.price == null) continue;
-    const weight = q.estimated ? 0.5 : Math.max(1, q.salesUsed);
+    const floor = q.basis?.askCap ?? Infinity;
+    const held = Math.min(q.price, floor, ceiling);
+    if (held < q.price) {
+      q.price = round2(held);
+      q.note = held === floor ? `held at the cheapest live ${q.condition} ask ($${round2(floor)}) \u2014 it can't be listed for more than it can be bought for` : `held under the ${ceilingFrom} price \u2014 a cleaner copy can be bought for $${round2(ceiling)}`;
+    }
+    if (floor < ceiling) {
+      ceiling = floor;
+      ceilingFrom = q.condition;
+    }
+  }
+  return Object.fromEntries(priced.map((p) => [p.quote.condition, p.quote]));
+}
+function enforceMonotonic(priced) {
+  const blocks = [];
+  for (const p of priced) {
+    const q = p.quote;
+    if (q.price == null) continue;
+    const weight = p.weight > 0 ? p.weight : 0.5;
     blocks.push({ weighted: weight * q.price, weight, members: [q] });
     while (blocks.length >= 2) {
       const last = blocks[blocks.length - 1];
@@ -1345,185 +1669,62 @@ function enforceMonotonic(quotes) {
     const pooled = round2(b.weighted / b.weight);
     for (const q of b.members) {
       if (q.price === pooled) continue;
+      const before = q.price;
+      const moved = Math.abs(pooled - before) >= before * 0.05;
       q.price = pooled;
-      q.note = q.note ?? "levelled with neighbouring conditions \u2014 their recent solds disagreed on which grade was worth more";
+      if (moved || !q.note) {
+        q.note = "levelled with neighbouring conditions \u2014 their recent solds disagreed on which grade was worth more";
+      }
     }
   }
 }
-function withoutOutliers(sales, valueOf) {
-  if (sales.length < 4) return sales;
-  const centre = median(sales.map(valueOf));
-  if (!(centre > 0)) return sales;
-  const kept = sales.filter((s) => valueOf(s) >= centre * 0.4 && valueOf(s) <= centre * 3);
-  return kept.length >= 2 ? kept : sales;
-}
-function createPricer(_ctx, deps) {
+function createPricer(ctx, deps) {
   const { csv, live, sku } = deps;
-  async function quote(params) {
-    const { productId, condition } = params;
+  const now = () => typeof ctx.now === "function" ? ctx.now() : Date.now();
+  async function rowsFor(params) {
     const categoryId = params.categoryId ?? null;
     const groupId = params.groupId ?? null;
+    if (categoryId == null || groupId == null) return [];
+    try {
+      return (await csv.prices(categoryId, groupId)).filter((r) => r.productId === params.productId);
+    } catch (err) {
+      console.error("[pricing] market price lookup failed:", err);
+      return [];
+    }
+  }
+  async function gather(params, at, shared) {
+    const { productId, condition } = params;
     const subType = params.subType ?? "";
-    const n = Math.min(Math.max(params.salesCount || 3, 1), 10);
-    const url = `https://www.tcgplayer.com/product/${productId}`;
+    const variantOk = variantMatcher(subType);
     const markets = await sku.skuMarkets(productId);
-    const hit = sku.skuMarketFor(markets, subType, CONDITION_NAME[condition]);
-    if (hit && hit.market > 0) {
-      return {
-        productId,
-        subType,
-        condition,
-        price: round2(hit.market),
-        source: "tcg_market",
-        estimated: false,
-        salesUsed: hit.sold,
-        marketPrice: null,
-        sales: [],
-        url,
-        asOf: hit.asOf,
-        listings: [],
-        listedLow: null,
-        listedMid: null
-      };
+    const market = sku.skuMarketFor(markets, subType, CONDITION_NAME[condition]);
+    let exact = [];
+    let mixed = [];
+    if (!(market && market.market > 0)) {
+      exact = await live.latestSales(productId, CONDITION_ID[condition]) ?? [];
+      const hasExact = exact.some((s) => variantOk(s.variant) && s.condition === CONDITION_NAME[condition]);
+      mixed = hasExact ? [] : await live.latestSales(productId) ?? [];
     }
-    const wantVariant = norm(subType);
-    const variantOk = (v) => !wantVariant || wantVariant === "market" || norm(v) === wantVariant;
-    const exactPool = await live.latestSales(productId, CONDITION_ID[condition]) ?? [];
-    const exact = exactPool.filter(
-      (s) => variantOk(s.variant) && s.condition === CONDITION_NAME[condition]
-    );
-    let price = null;
-    let source = "none";
-    let estimated = false;
-    let salesUsed = 0;
-    let shown = exact;
-    if (exact.length) {
-      const take = withoutOutliers(exact, (s) => s.price).slice(0, n);
-      price = round2(median(take.map((s) => s.price)));
-      salesUsed = take.length;
-      source = "sales";
-    } else {
-      const usable = (await live.latestSales(productId) ?? []).filter(
-        (s) => variantOk(s.variant)
-      );
-      shown = usable;
-      const known = usable.filter((s) => CODE_BY_NAME[s.condition]);
-      if (known.length >= 2) {
-        const take = withoutOutliers(known, (s) => s.price / FACTOR[CODE_BY_NAME[s.condition]]).slice(
-          0,
-          Math.max(n, 5)
-        );
-        const nmEquivalent = take.map((s) => s.price / FACTOR[CODE_BY_NAME[s.condition]]);
-        price = round2(median(nmEquivalent) * FACTOR[condition]);
-        salesUsed = take.length;
-        source = "sales_adj";
-        estimated = true;
-      }
-    }
-    let marketPrice = null;
-    let note;
-    let listedLow = null;
-    let listedMid = null;
-    if (categoryId != null && groupId != null) {
-      try {
-        const rows = await csv.prices(categoryId, groupId);
-        const mine = rows.filter((r) => r.productId === productId);
-        const row = mine.find((r) => norm(r.subTypeName) === wantVariant) ?? mine.find((r) => r.marketPrice != null);
-        if (row) {
-          const sane = saneMarketPrice(row);
-          marketPrice = sane.price;
-          listedLow = row.lowPrice != null && row.lowPrice !== 1e5 ? row.lowPrice : null;
-          listedMid = row.midPrice != null && row.midPrice !== 1e5 ? row.midPrice : null;
-          if (sane.adjusted) {
-            note = `TCGplayer's published market price ($${row.marketPrice}) looks stale for this printing \u2014 using current listing prices instead`;
-          }
-        }
-      } catch (err) {
-        console.error("[pricing] market price lookup failed:", err);
-      }
-    }
-    const listings = (await live.currentListings(productId) ?? []).filter(
-      (l) => variantOk(l.variant) && l.condition === CONDITION_NAME[condition] && l.price < 1e5
-    ).slice(0, 5);
-    if (price === null && marketPrice != null) {
-      price = round2(marketPrice * FACTOR[condition]);
-      source = condition === "NM" ? "market" : "market_adj";
-      estimated = condition !== "NM";
-    }
-    const askLevel = listings.length ? median(listings.map((l) => l.price + (l.shipping ?? 0))) : null;
-    if (price != null && askLevel != null && askLevel > 50 && salesUsed <= 2 && price < askLevel * 0.4) {
-      price = round2(askLevel);
-      source = "ask";
-      estimated = true;
-      note = note ?? `ignored a lone $${round2(exact[0]?.price ?? marketPrice ?? 0)} figure far below the ~$${round2(askLevel)} live asks \u2014 priced at the current ask level`;
-    }
-    return {
-      productId,
-      subType,
-      condition,
-      price,
-      source,
-      estimated,
-      salesUsed,
-      marketPrice,
-      sales: shown.slice(0, 5),
-      url,
-      note,
-      listings,
-      listedLow,
-      listedMid
-    };
+    const rows = shared?.rows ?? await rowsFor(params);
+    const listings = shared?.listings ?? (await live.currentListings(productId) ?? []);
+    return { market, exact, mixed, listings, rows, now: at };
+  }
+  async function quote(params) {
+    return priceFromEvidence(params, await gather(params, now())).quote;
   }
   async function quoteAll(params) {
-    const quotes = await Promise.all(
-      ALL_CONDITIONS.map((condition) => quote({ ...params, condition }))
+    const at = now();
+    const [rows, listings] = await Promise.all([
+      rowsFor(params),
+      (async () => await live.currentListings(params.productId) ?? [])()
+    ]);
+    const gathered = await Promise.all(
+      ALL_CONDITIONS.map((condition) => gather({ ...params, condition }, at, { rows, listings }))
     );
-    const result = () => Object.fromEntries(ALL_CONDITIONS.map((c, i) => [c, quotes[i]]));
-    if (quotes.some((q) => q.source === "tcg_market")) {
-      quotes.forEach((q, i) => {
-        if (TRUSTED.has(q.source) && q.price != null) return;
-        const above = quotes.slice(0, i).reverse().find((t) => t.source === "tcg_market");
-        const below = quotes.slice(i + 1).find((t) => t.source === "tcg_market");
-        const ref = above ?? below;
-        let p = round2(ref.price * FACTOR[q.condition] / FACTOR[ref.condition]);
-        if (above?.price != null && p > above.price) p = above.price;
-        if (below?.price != null && p < below.price) p = below.price;
-        q.price = p;
-        q.source = "scaled";
-        q.estimated = true;
-        q.salesUsed = 0;
-        q.note = `no TCGplayer market for ${q.condition} \u2014 scaled from its ${ref.condition} market`;
-      });
-      return result();
-    }
-    const nm = quotes[0];
-    if (nm.source === "ask" && nm.price != null) {
-      for (const q of quotes) {
-        if (q === nm) continue;
-        q.price = round2(nm.price * FACTOR[q.condition]);
-        q.source = "sales_adj";
-        q.estimated = true;
-        q.salesUsed = 0;
-        q.note = `scaled from the NM ask level \u2014 recent solds for this printing looked unreliable`;
-      }
-      return result();
-    }
-    const anchored = (s) => s === "sales" || s === "ask";
-    const trusted = quotes.filter((q) => anchored(q.source) && q.price != null);
-    if (trusted.length) {
-      const impliedNm = median(trusted.map((q) => q.price / FACTOR[q.condition]));
-      const salesUsed = trusted.reduce((a, q) => a + q.salesUsed, 0);
-      for (const q of quotes) {
-        if (anchored(q.source)) continue;
-        q.price = round2(impliedNm * FACTOR[q.condition]);
-        q.source = "sales_adj";
-        q.estimated = true;
-        q.salesUsed = salesUsed;
-        q.note = `no recent ${q.condition} solds of this printing \u2014 scaled from this printing's price in other conditions`;
-      }
-    }
-    enforceMonotonic(quotes);
-    return result();
+    const evidence = Object.fromEntries(
+      ALL_CONDITIONS.map((c, i) => [c, gathered[i]])
+    );
+    return ladderFromEvidence(params, evidence);
   }
   return { quote, quoteAll };
 }
@@ -1862,7 +2063,11 @@ function createSkuMarkets(ctx) {
         out[`${normVariant(s.variant)}|${s.condition}`] = {
           market: Number(latest.marketPrice),
           sold: Number(s.totalQuantitySold ?? 0),
-          asOf: String(latest.bucketStartDate ?? "").slice(0, 10)
+          asOf: String(latest.bucketStartDate ?? "").slice(0, 10),
+          sales: (s.buckets ?? []).filter((b) => Number(b.quantitySold) > 0).map((b) => ({
+            date: String(b.bucketStartDate ?? "").slice(0, 10),
+            quantity: Number(b.quantitySold)
+          }))
         };
       }
       return out;
@@ -2090,6 +2295,6 @@ function createPricing(config = {}) {
   };
 }
 
-export { ALL_CONDITIONS, CATEGORY_ID, CONDITIONS, CONDITION_ID, CONDITION_NAME, DEFAULT_CHROME_USER_AGENT, DEFAULT_USER_AGENT, FACTOR, GRADERS, GRADES, INDEX_GAMES, SKU_DEFAULT_COOLDOWN_MS, SKU_DEFAULT_MIN_INTERVAL_MS, assignTier, confidenceOf, createMemoryCache, createPricing, currentEdition, editionKey, enforceMonotonic, extValue, fromCents, gameForProductLine, gradeLabelFor, imageUrl, median, mergedEditions, nameSim, normNum, normNumber, normText, numMatch, numberScore, numberTokens, numberTotal, numberingOk, pickSubType, round2, saneMarketPrice, scorePcHit, splitProductName, toCents, withBuffer, withoutOutliers };
+export { ALL_CONDITIONS, ASK_DISCOUNT, ASK_TRUST_FROM, CATEGORY_ID, CONDITIONS, CONDITION_ID, CONDITION_NAME, DEFAULT_CHROME_USER_AGENT, DEFAULT_USER_AGENT, FACTOR, GRADERS, GRADES, INDEX_GAMES, SALE_HALF_LIFE_DAYS, SKU_DEFAULT_COOLDOWN_MS, SKU_DEFAULT_MIN_INTERVAL_MS, STALE_MARKET_AGE_DAYS, TRUSTED, askFloorOf, assembleLadder, assess, assignTier, blendLevels, confidenceOf, corroborationFor, createMemoryCache, createPricing, currentEdition, editionKey, enforceMonotonic, extValue, finish, fromCents, gameForProductLine, gradeLabelFor, imageUrl, ladderFromEvidence, median, mergedEditions, nameSim, normNum, normNumber, normText, numMatch, numberScore, numberTokens, numberTotal, numberingOk, pickSubType, priceFromEvidence, recencyWeight, round2, saleAgeDays, saneMarketPrice, scorePcHit, splitProductName, toCents, weightedMedian, withBuffer, withoutOutliers };
 //# sourceMappingURL=index.js.map
 //# sourceMappingURL=index.js.map

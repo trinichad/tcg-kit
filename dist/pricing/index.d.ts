@@ -90,8 +90,9 @@ interface PriceQuote {
      * market_adj – market price adjusted for condition
      * graded     – per-grade market value from eBay solds (PriceCharting)
      * ebay       – median of current eBay live ASKS (fallback when no sold guide)
-     * ask        – current TCGplayer ask level, used when a thin sold sample is
-     *              implausibly far below the live asks (bad-data guard)
+     * ask        – current TCGplayer ask level: the solds (or TCGplayer's
+     *              market) were too old or too few to outweigh the live asks,
+     *              or looked like bad data
      */
     source: 'tcg_market' | 'sales' | 'sales_adj' | 'scaled' | 'market' | 'market_adj' | 'graded' | 'ebay' | 'ask' | 'none';
     estimated: boolean;
@@ -114,6 +115,27 @@ interface PriceQuote {
     listedMid?: number | null;
     /** Set when the slab's cert was verified against PSA's records. */
     psa?: PsaVerify;
+    /** How a raw quote was put together (absent on graded/eBay quotes). */
+    basis?: PriceBasis;
+}
+/**
+ * The evidence behind a raw price. Solds fade with age (a sale today weighs
+ * 1, halving every 14 days) and are blended with the cheapest live ask, so
+ * a consumer can say how old the sales are and what the market is asking now.
+ */
+interface PriceBasis {
+    /** The sold level: TCGplayer's own market for the SKU, or the recency-weighted median of the solds used. */
+    soldLevel: number | null;
+    /** Total recency weight of the solds behind it (3 fresh sales ≈ 3, one month-old sale ≈ 0.25). */
+    soldWeight: number;
+    /** Age in days of the newest sale behind the sold level. */
+    newestSaleDays: number | null;
+    /** Cheapest live ask in this condition+printing (item price, no shipping). */
+    askFloor: number | null;
+    /** Weight the asks carried in the blend (1 = as much as one fresh sale). */
+    askWeight: number;
+    /** The price is never above this: the cheapest delivered ask (price + shipping), when it is real money. */
+    askCap: number | null;
 }
 /** Authoritative slab identity from PSA's cert-verification API. */
 interface PsaVerify {
@@ -259,6 +281,8 @@ interface PricingConfig {
     };
     /** Inject a fetch (proxy, instrumentation, tests). Defaults to global fetch. */
     fetch?: typeof fetch;
+    /** Inject the clock sale ages are measured against (tests). Defaults to Date.now. */
+    now?: () => number;
 }
 
 /**
@@ -468,6 +492,15 @@ interface SkuMarket {
     sold: number;
     /** Bucket day, YYYY-MM-DD. */
     asOf: string;
+    /**
+     * Days in the month window on which copies sold, newest first. This is
+     * how old the market price really is: a market with no sale in the window
+     * is a month-old number at best, and the pricer weighs it accordingly.
+     */
+    sales: {
+        date: string;
+        quantity: number;
+    }[];
 }
 /** printing|condition → market. Keys use the lower-cased printing name. */
 type SkuMarkets = Record<string, SkuMarket>;
@@ -484,6 +517,196 @@ declare const FACTOR: Record<ConditionCode, number>;
 declare const CONDITION_NAME: Record<ConditionCode, string>;
 declare const CONDITION_ID: Record<ConditionCode, number>;
 declare const ALL_CONDITIONS: ConditionCode[];
+/** Sources that are real numbers, not estimates. */
+declare const TRUSTED: Set<"none" | "tcg_market" | "sales" | "sales_adj" | "scaled" | "market" | "market_adj" | "graded" | "ebay" | "ask">;
+
+/**
+ * How fast a sale stops being evidence. A sale today is one full vote; one
+ * this many days old is half a vote, and it keeps halving — a month old is a
+ * quarter, two months a sixteenth. Anything much older than a month is
+ * background, not a price: the dealer's rule that an old sale must not set
+ * the price when the live listings say otherwise.
+ */
+declare const SALE_HALF_LIFE_DAYS = 14;
+/**
+ * A TCGplayer SKU market with no sale in its month window is at least this
+ * old — it is treated as a sale this many days ago (a quarter of a vote).
+ */
+declare const STALE_MARKET_AGE_DAYS = 30;
+/**
+ * Asks are wishes, not sales: a listing that has not sold yet sits, by
+ * definition, at or above the clearing price. The cheapest live ask counts
+ * at this fraction of its price. Where cards do have fresh solds, the sold
+ * price sits at 0.9–1.05x the cheapest ask (measured across 16 condition
+ * rungs of six cards on 2026-09-22).
+ */
+declare const ASK_DISCOUNT = 0.9;
+/**
+ * Asks carry full weight from this price up and proportionally less below,
+ * and the "never above the cheapest ask" cap only applies from here. Under
+ * a couple of dollars, listings are shipping-and-bulk noise: a $0.02 Bede
+ * behind $1.31 shipping is not what a $0.18 common sells for (an audit of
+ * 48 cards had every sub-$1 common capped at a bulk ask before this).
+ */
+declare const ASK_TRUST_FROM = 2;
+/**
+ * Everything one quote is computed from, fetched once and kept apart from
+ * the maths so a quote can be replayed from a fixture (tests/pricing).
+ */
+interface QuoteEvidence {
+    /** TCGplayer's own market for this exact printing × condition, if it has one. */
+    market: SkuMarket | null;
+    /** Solds in this exact condition, newest first (any printing). */
+    exact: SaleSample[];
+    /** Solds across all conditions, newest first; only consulted when `exact` holds none of this printing. */
+    mixed: SaleSample[];
+    /** Live asks for the product, cheapest first (any condition/printing). */
+    listings: ListingRow[];
+    /** tcgcsv price rows for this product, one per printing. */
+    rows: CsvPrice[];
+    /** The clock sale ages are measured against. */
+    now: number;
+}
+/** A quote plus what the ladder needs to weigh it against the other conditions. */
+interface Priced {
+    quote: PriceQuote;
+    /** Evidence weight: recency-weighted solds plus asks. 0 = nothing of its own. */
+    weight: number;
+    /** True when the price rests on this condition's own market, solds or asks. */
+    anchor: boolean;
+}
+declare function saleAgeDays(date: string, now: number): number;
+declare const recencyWeight: (ageDays: number) => number;
+/**
+ * Median where each value counts `weight` times: the value at which half the
+ * total weight is reached. With equal weights this is the ordinary median
+ * (an exact tie between two middle values averages them). Items must be
+ * non-empty.
+ */
+declare function weightedMedian(items: {
+    value: number;
+    weight: number;
+}[]): number;
+/**
+ * The cheapest live ask by item price — shipping excluded, because the sold
+ * prices it is compared with exclude shipping too. A lone ask under a TENTH
+ * of the next one is a broken or troll listing, not the market, and is
+ * skipped. Anything less extreme is a real listing a customer could buy:
+ * Mewtwo LV.X NM asked $185 under a row of $399–450 wishes, Tyranitar
+ * reverse holo MP $199.99 under a $600 one, and both were the market.
+ */
+declare function askFloorOf(listings: {
+    price: number;
+}[]): number | null;
+/**
+ * Weighted average of price levels in ratio terms (log space). A $125 sale
+ * under $858 asks is a 7x gap, not a $733 one; averaging the ratios keeps a
+ * lone wish from dragging a fresh sale up by hundreds of dollars, while
+ * levels within a few percent of each other blend to the same number either
+ * way. Falls back to the plain weighted mean if a level is not positive.
+ */
+declare function blendLevels(levels: {
+    value: number;
+    weight: number;
+}[]): number;
+/**
+ * Drop sales that sit far outside the recent price cluster.
+ *
+ * mpapi hands back the last five solds per condition, but a quote only
+ * medians the most recent N of them (default 3). A median of three survives
+ * one bad number and no more — so two deliberate undercuts in a row (or a lot
+ * piece, or a mispriced listing) becomes the price. Judging each sale against
+ * the median of the FULL window uses evidence that was already fetched.
+ *
+ * The band is deliberately wide (0.4x to 3x): it is there to reject sales that
+ * are not really this card being sold at market, not to smooth normal drift. A
+ * genuine crash of up to 60% inside one window still passes through.
+ */
+declare function withoutOutliers<T>(sales: T[], valueOf: (s: T) => number): T[];
+/**
+ * Stage 1 — weigh the evidence for one condition.
+ *
+ * 0. TCGplayer's own market for this exact printing × condition, when it has
+ *    one: the sold level, weighed by the sales behind it (the daily buckets
+ *    say when copies last sold; none in the window ⇒ a month old at best).
+ * 1. Else solds in this exact condition+printing, newest first, outliers
+ *    dropped, the last N taken; each carries a recency weight (1 today,
+ *    halving every SALE_HALF_LIFE_DAYS); the level is their weighted median.
+ * 2. Else the mixed-condition pool normalised to NM and scaled, at half
+ *    weight (indirect evidence).
+ * 3. The cheapest live ask in this condition+printing carries up to the
+ *    weight of one fresh sale.
+ */
+interface Assessment {
+    params: PriceRef;
+    soldLevel: number | null;
+    soldWeight: number;
+    salesUsed: number;
+    newestSaleDays: number | null;
+    /** The sold level is this condition's own (TCGplayer's SKU market or exact solds), not the mixed pool. */
+    exactUsed: boolean;
+    source: PriceQuote['source'];
+    shown: SaleSample[];
+    marketPrice: number | null;
+    /** TCGplayer's published product market price as-is (null when missing or the 100000 placeholder). */
+    publishedMarket: number | null;
+    marketNote?: string;
+    listedLow: number | null;
+    listedMid: number | null;
+    listings: ListingSample[];
+    askFloor: number | null;
+    askWeight: number;
+    /** Cheapest delivered ask (price + shipping), null when under ASK_TRUST_FROM. */
+    askCap: number | null;
+    /** `tcg_market` rungs: the day of the bucket the market came from. */
+    asOf?: string;
+}
+declare function assess(params: PriceRef, ev: QuoteEvidence): Assessment;
+/**
+ * An independent estimate of what this condition should be worth, for the
+ * bad-data tripwire: the other conditions' own sold levels scaled to this
+ * one (their evidence weight deciding), or failing that TCGplayer's
+ * published product market price. Null when there is neither.
+ *
+ * Why the other conditions and not the market stat alone: on a 1st-Ed
+ * Charizard the bogus $250 "sale" had ALSO become TCGplayer's market price,
+ * but the LP/MP copies still sold in the thousands.
+ */
+declare function corroborationFor(a: Assessment, others: Assessment[]): number | null;
+/**
+ * Stage 2 — the price: the weight-blended sold and ask levels, never above
+ * the cheapest delivered ask. Fresh solds keep the say; as they age the asks
+ * take over and the source turns to `ask`. Nothing at all → TCGplayer's
+ * product market price scaled by condition.
+ */
+declare function finish(a: Assessment, corroboration: number | null): Priced;
+/** One condition on its own: the tripwire is corroborated by the product market price only. */
+declare function priceFromEvidence(params: PriceRef, ev: QuoteEvidence): Priced;
+/**
+ * All five conditions from evidence already fetched: each rung's tripwire is
+ * corroborated by the other rungs' sold levels, then the ladder is assembled.
+ */
+declare function ladderFromEvidence(base: Omit<PriceRef, 'condition'>, evidence: Record<ConditionCode, QuoteEvidence>): ConditionQuotes;
+/**
+ * Cross-check the conditions against each other.
+ *
+ * A condition with its own evidence — TCGplayer's market for that SKU, solds
+ * in that exact condition, or live asks — keeps its own price; it is never
+ * overwritten by a figure scaled from another rung (that once priced Mewtwo
+ * LV.X LP at $378 "from the NM ask" while five real LP solds and a dozen LP
+ * asks said ~$100). Conditions with nothing of their own are scaled from the
+ * NEAREST anchored rung by factor ratio and clamped between their anchored
+ * neighbours: vintage ladders are steep (Abra Shadowless: NM $10.65 → HP
+ * $1.08), so "nearest rung" beats "NM × factor" by a wide margin.
+ *
+ * Then: with no TCGplayer rung at all, inversions are pooled (isotonic
+ * regression, see enforceMonotonic). With TCGplayer rungs present, TCGplayer's
+ * own numbers are never pooled or "corrected" — matching tcgplayer.com is the
+ * definition of accurate — but a rung of OURS can't sit above a cleaner
+ * TCGplayer grade. Last, nothing above what it can be bought for: a cleaner
+ * grade's cheapest listing bounds every grade below it.
+ */
+declare function assembleLadder(priced: Priced[]): ConditionQuotes;
 /**
  * Force the ladder to be non-increasing (NM >= LP >= MP >= HP >= DM).
  *
@@ -495,9 +718,10 @@ declare const ALL_CONDITIONS: ConditionCode[];
  *
  * Pool-adjacent-violators is the minimal honest correction: where the order is
  * violated, the offending run is replaced by its evidence-weighted mean and
- * nothing else moves. Conditions backed by more solds pull harder, and an
- * already-monotone ladder is left completely untouched — so this only ever
- * fires on data that was self-contradictory to begin with.
+ * nothing else moves. Rungs backed by fresh solds and live asks pull harder;
+ * derived rungs (weight 0.5) and stale ones bend. An already-monotone ladder
+ * is left completely untouched — so this only ever fires on data that was
+ * self-contradictory to begin with.
  *
  * Pooling to equal prices is the correct outcome, not a cop-out: it says the
  * sales data cannot tell those grades apart, which for a $0.20 common is true.
@@ -505,21 +729,7 @@ declare const ALL_CONDITIONS: ConditionCode[];
  * Used ONLY for ladders built from solds. TCGplayer's own per-condition
  * markets are never pooled — they are shown exactly as TCGplayer shows them.
  */
-declare function enforceMonotonic(quotes: PriceQuote[]): void;
-/**
- * Drop sales that sit far outside the recent price cluster.
- *
- * TCGplayer hands back the last ~25 solds, but a quote only medians the most
- * recent 3-5 of them. A median of three survives one bad number and no more —
- * so two deliberate undercuts in a row (or a lot piece, or a mispriced
- * listing) becomes the price. Judging each sale against the median of the FULL
- * window uses evidence that was already fetched and thrown away.
- *
- * The band is deliberately wide (0.4x to 3x): it is there to reject sales that
- * are not really this card being sold at market, not to smooth normal drift. A
- * genuine crash of up to 60% inside one window still passes through.
- */
-declare function withoutOutliers<T>(sales: T[], valueOf: (s: T) => number): T[];
+declare function enforceMonotonic(priced: Priced[]): void;
 
 type PcHost = 'tcg' | 'sports';
 interface PcSearchHit {
@@ -618,4 +828,4 @@ interface TcgPricing {
 }
 declare function createPricing(config?: PricingConfig): TcgPricing;
 
-export { ALL_CONDITIONS, CONDITIONS, CONDITION_ID, CONDITION_NAME, type CacheStore, type ConditionCode, type ConditionQuotes, type CrossCheck, type CrossPrice, type CsvCategory, type CsvGroup, type CsvPrice, type CsvProduct, DEFAULT_CHROME_USER_AGENT, DEFAULT_USER_AGENT, type EbayAsks, type EbayListing, FACTOR, GRADERS, GRADES, type Game, type GradedInfo, type GradedQuery, type GroupPrice, type HealthResult, type ListingRow, type ListingSample, type MergedEdition, type PcCardQuery, type PcData, type PcHost, type PcSale, type PcSearchHit, type PriceConfidence, type PriceQuote, type PriceRef, type PricedCard, type PricingConfig, type ProductMatch, type PsaLookup, type PsaLookupError, type PsaVerify, type ResolveRequestCard, type ResolveResult, SKU_DEFAULT_COOLDOWN_MS, SKU_DEFAULT_MIN_INTERVAL_MS, type SaleSample, type SearchHit, type SkuMarket, type SkuMarkets, type SkuState, type SubTypePrice, type TcgPricing, type TierRule, assignTier, confidenceOf, createMemoryCache, createPricing, currentEdition, editionKey, enforceMonotonic, extValue, fromCents, gameForProductLine, gradeLabelFor, imageUrl, median, mergedEditions, nameSim, normNum, normNumber, normText, numMatch, numberScore, numberTokens, numberTotal, numberingOk, pickSubType, round2, saneMarketPrice, scorePcHit, splitProductName, toCents, withBuffer, withoutOutliers };
+export { ALL_CONDITIONS, ASK_DISCOUNT, ASK_TRUST_FROM, type Assessment, CONDITIONS, CONDITION_ID, CONDITION_NAME, type CacheStore, type ConditionCode, type ConditionQuotes, type CrossCheck, type CrossPrice, type CsvCategory, type CsvGroup, type CsvPrice, type CsvProduct, DEFAULT_CHROME_USER_AGENT, DEFAULT_USER_AGENT, type EbayAsks, type EbayListing, FACTOR, GRADERS, GRADES, type Game, type GradedInfo, type GradedQuery, type GroupPrice, type HealthResult, type ListingRow, type ListingSample, type MergedEdition, type PcCardQuery, type PcData, type PcHost, type PcSale, type PcSearchHit, type PriceBasis, type PriceConfidence, type PriceQuote, type PriceRef, type Priced, type PricedCard, type PricingConfig, type ProductMatch, type PsaLookup, type PsaLookupError, type PsaVerify, type QuoteEvidence, type ResolveRequestCard, type ResolveResult, SALE_HALF_LIFE_DAYS, SKU_DEFAULT_COOLDOWN_MS, SKU_DEFAULT_MIN_INTERVAL_MS, STALE_MARKET_AGE_DAYS, type SaleSample, type SearchHit, type SkuMarket, type SkuMarkets, type SkuState, type SubTypePrice, TRUSTED, type TcgPricing, type TierRule, askFloorOf, assembleLadder, assess, assignTier, blendLevels, confidenceOf, corroborationFor, createMemoryCache, createPricing, currentEdition, editionKey, enforceMonotonic, extValue, finish, fromCents, gameForProductLine, gradeLabelFor, imageUrl, ladderFromEvidence, median, mergedEditions, nameSim, normNum, normNumber, normText, numMatch, numberScore, numberTokens, numberTotal, numberingOk, pickSubType, priceFromEvidence, recencyWeight, round2, saleAgeDays, saneMarketPrice, scorePcHit, splitProductName, toCents, weightedMedian, withBuffer, withoutOutliers };

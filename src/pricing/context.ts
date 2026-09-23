@@ -45,6 +45,8 @@ export interface PricingCtx {
   limitTcgLive: Limit;
   /** Concurrency gate for PriceCharting scrapes (default 2). */
   limitPriceCharting: Limit;
+  /** The clock sale ages are measured against (tests freeze it). */
+  now: () => number;
 }
 
 export function createContext(config: PricingConfig = {}): PricingCtx {
@@ -77,5 +79,6 @@ export function createContext(config: PricingConfig = {}): PricingCtx {
     // a slab-heavy page fires several graded lookups at once, and without this
     // the later ones silently degrade to "set price manually".
     limitPriceCharting: createLimiter(config.concurrency?.pricecharting ?? 2),
+    now: config.now ?? Date.now,
   };
 }

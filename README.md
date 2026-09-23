@@ -60,9 +60,21 @@ with `price` / `priceAll` / `priceMany` — deterministic and cheap.
 **Sources, in the order `quote()` trusts them:** `tcg_market` (TCGplayer per-SKU market — exact per
 printing × condition; **paced: one request at a time, ≥1.2 s apart**) → `sales` (recent exact-condition
 solds, outliers outside 0.4×–3× dropped) → `sales_adj` → `market` / `market_adj` (tcgcsv product market
-× condition factor) → `ask` (floor guard). When any rung has a `tcg_market`, missing rungs are `scaled`
-from the nearest TCGplayer rung and clamped between trusted neighbours; otherwise the ladder is forced
-monotonic by weighted isotonic regression. **Nothing "corrects" a TCGplayer number.**
+× condition factor). When any rung has a `tcg_market`, missing rungs are `scaled` from the nearest
+anchored rung and clamped between trusted neighbours; otherwise the ladder is forced monotonic by
+weighted isotonic regression.
+
+**The metric (v0.1.2, same engine as BinderPricer `ad9350c`):** sold evidence fades with age — a sale
+today is a full vote, two weeks old half, a month a quarter (`SALE_HALF_LIFE_DAYS`); TCGplayer's SKU
+market is weighed by the sales behind it (its daily buckets), so a market with no sale in the month is a
+quarter-vote number. It is blended in ratio terms with the cheapest live ask in that condition + printing
+(discounted 10 %, never below the sold level, carrying up to one fresh sale's weight; asks a fresh sale
+contradicts lose weight; sub-$2 asks and a lone ask 3× above the other conditions are ignored). When the
+asks carry the price the source is `ask` (`estimated: true`). **A price is never above the cheapest
+delivered listing** in that condition — per rung, and a cleaner grade's listing bounds every grade below
+it. TCGplayer's own numbers are never pooled or "corrected" as numbers, only held at a cheaper listing.
+`quote.basis` carries the evidence (sold level + weight, newest sale age, ask floor + weight, cap).
+The maths is pure — `assess` / `finish` / `ladderFromEvidence` replay from a fixture in the tests.
 
 `confidenceOf(quote)`: `exact` (tcg_market, graded, or ≥2 exact-condition solds) · `estimated`
 (scaled / factor-adjusted) · `low` (bare product market, single sale, ask). **Never tier a card on
