@@ -10,7 +10,9 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   ASK_DISCOUNT,
+  NOT_THE_PRODUCT,
   askFloorOf,
+  askPool,
   createPricer,
   enforceMonotonic,
   ladderFromEvidence,
@@ -47,6 +49,20 @@ const ask = (price: number, condition = 'Near Mint', shipping = 0, variant = 'No
   condition,
   variant,
   quantity: 1,
+  custom: false,
+  title: '',
+});
+/** A custom (photo) listing with the seller's own words. */
+const customAsk = (price: number, title: string, condition = 'Near Mint'): ListingRow => ({
+  ...ask(price, condition),
+  custom: true,
+  title,
+});
+/** A sale from a photo listing with the seller's own title. */
+const customSale = (price: number, ageDays: number, title: string, condition = 'Near Mint'): SaleSample => ({
+  ...sale(price, ageDays, condition),
+  custom: true,
+  title,
 });
 const row = (marketPrice: number | null, subTypeName = 'Normal'): CsvPrice => ({
   productId: 1,
@@ -254,6 +270,56 @@ describe("TCGplayer's own market as the sold level", () => {
   });
 });
 
+describe("listings and sales that are not the product (Mega Charizard X ex, 2026-09-24)", () => {
+  const fresh = [sale(650, 1), sale(645, 2), sale(640, 3)];
+
+  it('NOT_THE_PRODUCT matches languages, slabs and proxies, not ordinary titles', () => {
+    for (const t of ['Spanish see pics', 'Mega Char PSA 10', 'Tag 10 Slab', 'BGS 9.5', 'graded copy', 'proxy']) expect(NOT_THE_PRODUCT.test(t)).toBe(true);
+    for (const t of ['Mega Charizard X ex 125/094', 'with photo', 'Near Mint centering pics']) expect(NOT_THE_PRODUCT.test(t)).toBe(false);
+  });
+
+  it('a Spanish photo listing never sets the floor, but still shows in the asks list', () => {
+    const p = one('NM', {
+      exact: fresh,
+      listings: [customAsk(479.99, 'Mega Charizard x ex 125/094 Spanish see pics'), customAsk(499.99, 'Spanish'), ask(643.99, 'Near Mint', 0.99), ask(645.99), ask(649)],
+    });
+    expect(p.quote.basis?.askFloor).toBe(643.99);
+    expect(p.quote.price).toBeGreaterThanOrEqual(640);
+    expect(p.quote.listings?.[0]).toMatchObject({ custom: true, price: 479.99 });
+  });
+
+  it('a Spanish or slabbed photo-listing sale is not a sale of this card', () => {
+    const spanish = one('NM', { exact: [customSale(480, 0, 'Spanish copy'), ...fresh], listings: [ask(645), ask(649), ask(650)] });
+    expect(spanish.quote.salesUsed).toBe(3);
+    expect(spanish.quote.price).toBeGreaterThanOrEqual(640);
+    const slab = one('NM', { exact: [customSale(2149, 0, 'Mega Char PSA 10'), ...fresh], listings: [ask(645), ask(649), ask(650)] });
+    expect(slab.quote.price).toBeLessThanOrEqual(660);
+  });
+
+  it('a plain photo listing yields the floor to standard listings, and sets it only when it is all there is', () => {
+    const withStandard = one('NM', { exact: fresh, listings: [customAsk(600, 'with photo'), ask(645), ask(649)] });
+    expect(withStandard.quote.basis?.askFloor).toBe(645);
+    const onlyCustom = one('NM', { exact: fresh, listings: [customAsk(600, 'with photo'), customAsk(620, 'photo')] });
+    expect(onlyCustom.quote.basis?.askFloor).toBe(600);
+  });
+
+  it('a lone ask far below fresh sales and the next ask is skipped; two cheap asks or stale solds are not', () => {
+    expect(askPool([ask(480), ask(645), ask(649)], 650, 2.7).map((x) => x.price)).toEqual([645, 649]);
+    expect(askPool([ask(480), ask(490), ask(649)], 650, 2.7)).toHaveLength(3);
+    expect(askPool([ask(480), ask(645), ask(649)], 650, 0.3)).toHaveLength(3);
+  });
+
+  it("the same guards sit under TCGplayer's market (the kit's rung 0)", () => {
+    const p = one('NM', {
+      market: market(683.13, [0, 1, 2]),
+      listings: [customAsk(479.99, 'Spanish see pics'), ask(643.99, 'Near Mint', 0.99), ask(645.99), ask(649)],
+    });
+    expect(p.quote.basis?.askFloor).toBe(643.99);
+    expect(p.quote.price).toBe(644.98); // held at the cheapest real English copy, delivered
+    expect(p.quote.source).toBe('tcg_market');
+  });
+});
+
 describe('solds ladder (no TCGplayer market)', () => {
   it('a liquid card is priced at its fresh solds — the blend is a no-op', () => {
     const p = one('NM', { exact: [sale(2, 0), sale(2, 1), sale(2, 2)], listings: [ask(2.1), ask(2.15), ask(2.25, 'Near Mint', 1.31)] });
@@ -453,6 +519,7 @@ describe('replay of the six cards from BinderPricer (same engine, same answers)'
     name: string;
     productId: number;
     groupId: number;
+    capturedAt?: string;
     rows: CsvPrice[];
     salesByCond: Record<ConditionCode, SaleSample[] | null>;
     mixed: SaleSample[] | null;
@@ -462,9 +529,9 @@ describe('replay of the six cards from BinderPricer (same engine, same answers)'
     capturedAt: string;
     cards: Record<string, FixtureCard>;
   };
-  const at = Date.parse(fixture.capturedAt);
   const replay = (productId: number, subType: string) => {
     const card = fixture.cards[String(productId)];
+    const at = Date.parse(card.capturedAt ?? fixture.capturedAt);
     const ev = Object.fromEntries(
       CODES.map((c) => [
         c,
@@ -507,6 +574,14 @@ describe('replay of the six cards from BinderPricer (same engine, same answers)'
     expect(l.LP!.price).toBeLessThanOrEqual(45);
     expect(l.DM!.price).toBeGreaterThanOrEqual(9);
     expect(l.DM!.price).toBeLessThanOrEqual(12);
+    expect(monotone(l)).toBe(true);
+  });
+
+  it('Mega Charizard X ex: not held at a $479.99 Spanish photo listing (captured 2026-09-24)', () => {
+    const l = replay(662184, 'Holofoil');
+    expect(l.NM!.basis?.askFloor).toBe(643.99);
+    expect(l.NM!.price).toBeGreaterThanOrEqual(630);
+    expect(l.NM!.source).toBe('sales');
     expect(monotone(l)).toBe(true);
   });
 

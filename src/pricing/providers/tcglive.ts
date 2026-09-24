@@ -73,6 +73,10 @@ export interface ListingRow {
   condition: string;
   variant: string;
   quantity: number;
+  /** A custom (photo) listing: the seller's own title/description, which may not be the plain product. */
+  custom: boolean;
+  /** The seller's own words on a custom listing (title + description, tags stripped); '' otherwise. */
+  title: string;
 }
 
 interface RawListing {
@@ -81,6 +85,24 @@ interface RawListing {
   condition?: string;
   printing?: string;
   quantity?: number;
+  /** 'standard' | 'custom' — a custom listing carries the seller's photos and text. */
+  listingType?: string;
+  customData?: { title?: string | null; description?: string | null } | null;
+}
+
+/** A custom listing's title + description as plain text (the description arrives HTML-escaped). */
+export function sellerText(c: RawListing['customData']): string {
+  return [c?.title, c?.description]
+    .filter(Boolean)
+    .join(' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 200);
 }
 
 interface RawSale {
@@ -90,6 +112,10 @@ interface RawSale {
   quantity?: number;
   purchasePrice?: number;
   orderDate?: string;
+  /** 'ListingWithPhotos' (a custom listing) | 'ListingWithoutPhotos'. */
+  listingType?: string;
+  /** The seller's own title for a photo listing; the product name otherwise. */
+  title?: string;
 }
 
 export type TcgLive = ReturnType<typeof createTcgLive>;
@@ -231,6 +257,8 @@ export function createTcgLive(ctx: PricingCtx) {
           condition: l.condition ?? '',
           variant: l.printing ?? '',
           quantity: l.quantity ?? 1,
+          custom: l.listingType === 'custom',
+          title: l.listingType === 'custom' ? sellerText(l.customData) : '',
         }));
     });
   }
@@ -267,6 +295,8 @@ export function createTcgLive(ctx: PricingCtx) {
           price: s.purchasePrice as number,
           condition: s.condition ?? '',
           variant: s.variant ?? '',
+          custom: s.listingType === 'ListingWithPhotos',
+          title: s.listingType === 'ListingWithPhotos' ? (s.title ?? '').slice(0, 200) : '',
         }));
     });
   }

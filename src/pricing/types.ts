@@ -77,9 +77,11 @@ export interface SaleSample {
   price: number;
   condition: string; // TCGplayer condition, or the marketplace ("eBay") for PriceCharting rows
   variant: string;
-  /** PriceCharting rows: the sold listing's title and link. */
+  /** PriceCharting rows: the sold listing's title and link. TCGplayer photo listings: the seller's own title. */
   title?: string;
   url?: string;
+  /** TCGplayer: sold from a custom (photo) listing — the seller's own description, not the plain product. */
+  custom?: boolean;
 }
 
 /** A live TCGplayer listing (current ask). */
@@ -89,6 +91,10 @@ export interface ListingSample {
   condition: string;
   variant: string;
   quantity: number;
+  /** A custom (photo) listing: the seller's own title/description, which may not be the plain product. */
+  custom?: boolean;
+  /** The seller's own words on a custom listing (title + description, tags stripped). */
+  title?: string;
 }
 
 /** Per-condition quotes, prefetched so condition changes need no request. */

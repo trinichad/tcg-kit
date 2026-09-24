@@ -64,7 +64,7 @@ solds, outliers outside 0.4×–3× dropped) → `sales_adj` → `market` / `mar
 anchored rung and clamped between trusted neighbours; otherwise the ladder is forced monotonic by
 weighted isotonic regression.
 
-**The metric (v0.1.3, same engine as BinderPricer `ad9350c`):** sold evidence fades with age — a sale
+**The metric (v0.1.4, same engine as BinderPricer `ad9350c`):** sold evidence fades with age — a sale
 today is a full vote, two weeks old half, a month a quarter (`SALE_HALF_LIFE_DAYS`); TCGplayer's SKU
 market is weighed by the sales behind it (its daily buckets), so a market with no sale in the month is a
 quarter-vote number. It is blended in ratio terms with the cheapest live ask in that condition + printing
@@ -73,7 +73,11 @@ contradicts lose weight; sub-$2 asks and a lone ask 3× above the other conditio
 asks carry the price the source is `ask` (`estimated: true`). **A price is never above the cheapest
 delivered listing** in that condition — per rung, and a cleaner grade's listing bounds every grade below
 it. TCGplayer's own numbers are never pooled or "corrected" as numbers, only held at a cheaper listing.
-`quote.basis` carries the evidence (sold level + weight, newest sale age, ask floor + weight, cap).
+Custom (photo) listings and photo-listing sales whose seller text says the copy is not the plain product
+(another language, a slab or grade, proxy, signed — `NOT_THE_PRODUCT`) are ignored; other custom listings
+never set the floor while a standard listing exists; a lone ask far below fresh sales and the next ask is
+skipped (`askPool`). `quote.basis` carries the evidence (sold level + weight, newest sale age, ask floor +
+weight, cap).
 The maths is pure — `assess` / `finish` / `ladderFromEvidence` replay from a fixture in the tests.
 
 `confidenceOf(quote)`: `exact` (tcg_market, graded, or ≥2 exact-condition solds) · `estimated`

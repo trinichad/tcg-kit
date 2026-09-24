@@ -361,6 +361,9 @@ function linesFor(game, language) {
   if (game === "pokemon" && language && /japan/i.test(language)) lines.push("pokemon japan");
   return lines.length ? lines : void 0;
 }
+function sellerText(c) {
+  return [c?.title, c?.description].filter(Boolean).join(" ").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 200);
+}
 function createTcgLive(ctx) {
   const headers = (extra = {}) => ({
     "user-agent": ctx.chromeUserAgent,
@@ -463,7 +466,9 @@ function createTcgLive(ctx) {
         shipping: typeof l.shippingPrice === "number" ? l.shippingPrice : null,
         condition: l.condition ?? "",
         variant: l.printing ?? "",
-        quantity: l.quantity ?? 1
+        quantity: l.quantity ?? 1,
+        custom: l.listingType === "custom",
+        title: l.listingType === "custom" ? sellerText(l.customData) : ""
       }));
     });
   }
@@ -485,7 +490,9 @@ function createTcgLive(ctx) {
         date: s.orderDate ?? "",
         price: s.purchasePrice,
         condition: s.condition ?? "",
-        variant: s.variant ?? ""
+        variant: s.variant ?? "",
+        custom: s.listingType === "ListingWithPhotos",
+        title: s.listingType === "ListingWithPhotos" ? (s.title ?? "").slice(0, 200) : ""
       }));
     });
   }
@@ -1332,6 +1339,18 @@ var ASK_FULL_WEIGHT_AT = 3;
 var ASK_TRUST_FROM = 2;
 var BAD_SALE_BELOW_ASK = 0.4;
 var DAY_MS = 864e5;
+var NOT_THE_PRODUCT = /\b(spanish|espa[ñn]ol|japanese|japan|jpn|german|deutsch|french|fran[cç]ais|italian|italiano|portuguese|portugu[eê]s|korean|chinese|thai|indonesian|russian|latam|latin american|slab|slabbed|graded|proxy|signed|autographed?)\b|\b(psa|bgs|cgc|sgc|ace|tag)\s*\d{1,2}(?:\.5)?\b/i;
+var notTheProduct = (e) => e.custom === true && NOT_THE_PRODUCT.test(e.title ?? "");
+function askPool(eligible, soldLevel, soldWeight) {
+  const honest = eligible.filter((l) => !notTheProduct(l));
+  const standard = honest.filter((l) => !l.custom);
+  let pool = standard.length ? standard : honest;
+  const byPrice = [...pool].sort((a, b) => a.price - b.price);
+  if (byPrice.length >= 2 && soldLevel != null && soldWeight >= 1 && byPrice[0].price < soldLevel * 0.75 && byPrice[0].price < byPrice[1].price * 0.8) {
+    pool = pool.filter((l) => l !== byPrice[0]);
+  }
+  return pool;
+}
 function saleAgeDays(date, now) {
   const t = Date.parse(date);
   return Number.isFinite(t) ? Math.max(0, (now - t) / DAY_MS) : SALE_HALF_LIFE_DAYS;
@@ -1390,7 +1409,9 @@ function assess(params, ev) {
   let exactUsed = false;
   let shown = [];
   let asOf;
-  const exact = ev.exact.filter((s) => variantOk(s.variant) && s.condition === CONDITION_NAME[condition]);
+  const exact = ev.exact.filter(
+    (s) => variantOk(s.variant) && s.condition === CONDITION_NAME[condition] && !notTheProduct(s)
+  );
   if (ev.market && ev.market.market > 0) {
     const units = [];
     for (const day of ev.market.sales ?? []) {
@@ -1414,7 +1435,7 @@ function assess(params, ev) {
     exactUsed = true;
     shown = exact;
   } else {
-    const usable = ev.mixed.filter((s) => variantOk(s.variant));
+    const usable = ev.mixed.filter((s) => variantOk(s.variant) && !notTheProduct(s));
     shown = usable;
     const known = usable.filter((s) => CODE_BY_NAME[s.condition]);
     if (known.length >= 2) {
@@ -1446,10 +1467,14 @@ function assess(params, ev) {
       marketNote = `TCGplayer's published market price ($${row.marketPrice}) looks stale for this printing \u2014 using current listing prices instead`;
     }
   }
-  const listings = ev.listings.filter((l) => variantOk(l.variant) && l.condition === CONDITION_NAME[condition] && l.price < 1e5).slice(0, 5);
-  const askFloor = askFloorOf(listings);
-  const askWeight = askFloor == null ? 0 : Math.min(listings.length, ASK_FULL_WEIGHT_AT) / ASK_FULL_WEIGHT_AT * Math.min(1, askFloor / ASK_TRUST_FROM);
-  const delivered = askFloorOf(listings.map((l) => ({ price: l.price + (l.shipping ?? 0) })));
+  const eligible = ev.listings.filter(
+    (l) => variantOk(l.variant) && l.condition === CONDITION_NAME[condition] && l.price < 1e5
+  );
+  const listings = eligible.slice(0, 5);
+  const pool = askPool(eligible, soldLevel, soldWeight);
+  const askFloor = askFloorOf(pool);
+  const askWeight = askFloor == null ? 0 : Math.min(pool.length, ASK_FULL_WEIGHT_AT) / ASK_FULL_WEIGHT_AT * Math.min(1, askFloor / ASK_TRUST_FROM);
+  const delivered = askFloorOf(pool.map((l) => ({ price: l.price + (l.shipping ?? 0) })));
   const askCap = delivered != null && delivered >= ASK_TRUST_FROM ? delivered : null;
   return {
     params,
@@ -1469,6 +1494,7 @@ function assess(params, ev) {
     askFloor,
     askWeight,
     askCap,
+    askCount: pool.length,
     asOf
   };
 }
@@ -1485,10 +1511,10 @@ function finish(a, corroboration) {
   const { productId, condition } = a.params;
   const subType = a.params.subType ?? "";
   let { soldLevel, soldWeight, salesUsed, newestSaleDays, source, askWeight, askCap } = a;
-  const { askFloor, marketPrice, listings } = a;
+  const { askFloor, marketPrice, listings, askCount } = a;
   const fromTcg = a.source === "tcg_market";
   let wishNote;
-  if (askFloor != null && listings.length === 1 && corroboration != null && askFloor > corroboration * 3) {
+  if (askFloor != null && askCount === 1 && corroboration != null && askFloor > corroboration * 3) {
     wishNote = `the one live ${condition} ask ($${round2(askFloor)}) is far above what other conditions sell for \u2014 ignored`;
     askWeight = 0;
     askCap = null;
@@ -2295,6 +2321,6 @@ function createPricing(config = {}) {
   };
 }
 
-export { ALL_CONDITIONS, ASK_DISCOUNT, ASK_TRUST_FROM, CATEGORY_ID, CONDITIONS, CONDITION_ID, CONDITION_NAME, DEFAULT_CHROME_USER_AGENT, DEFAULT_USER_AGENT, FACTOR, GRADERS, GRADES, INDEX_GAMES, SALE_HALF_LIFE_DAYS, SKU_DEFAULT_COOLDOWN_MS, SKU_DEFAULT_MIN_INTERVAL_MS, STALE_MARKET_AGE_DAYS, TRUSTED, askFloorOf, assembleLadder, assess, assignTier, blendLevels, confidenceOf, corroborationFor, createMemoryCache, createPricing, currentEdition, editionKey, enforceMonotonic, extValue, finish, fromCents, gameForProductLine, gradeLabelFor, imageUrl, ladderFromEvidence, median, mergedEditions, nameSim, normNum, normNumber, normText, numMatch, numberScore, numberTokens, numberTotal, numberingOk, pickSubType, priceFromEvidence, recencyWeight, round2, saleAgeDays, saneMarketPrice, scorePcHit, splitProductName, toCents, weightedMedian, withBuffer, withoutOutliers };
+export { ALL_CONDITIONS, ASK_DISCOUNT, ASK_TRUST_FROM, CATEGORY_ID, CONDITIONS, CONDITION_ID, CONDITION_NAME, DEFAULT_CHROME_USER_AGENT, DEFAULT_USER_AGENT, FACTOR, GRADERS, GRADES, INDEX_GAMES, NOT_THE_PRODUCT, SALE_HALF_LIFE_DAYS, SKU_DEFAULT_COOLDOWN_MS, SKU_DEFAULT_MIN_INTERVAL_MS, STALE_MARKET_AGE_DAYS, TRUSTED, askFloorOf, askPool, assembleLadder, assess, assignTier, blendLevels, confidenceOf, corroborationFor, createMemoryCache, createPricing, currentEdition, editionKey, enforceMonotonic, extValue, finish, fromCents, gameForProductLine, gradeLabelFor, imageUrl, ladderFromEvidence, median, mergedEditions, nameSim, normNum, normNumber, normText, numMatch, numberScore, numberTokens, numberTotal, numberingOk, pickSubType, priceFromEvidence, recencyWeight, round2, saleAgeDays, saneMarketPrice, scorePcHit, splitProductName, toCents, weightedMedian, withBuffer, withoutOutliers };
 //# sourceMappingURL=index.js.map
 //# sourceMappingURL=index.js.map

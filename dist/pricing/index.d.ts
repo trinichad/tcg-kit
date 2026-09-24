@@ -61,9 +61,11 @@ interface SaleSample {
     price: number;
     condition: string;
     variant: string;
-    /** PriceCharting rows: the sold listing's title and link. */
+    /** PriceCharting rows: the sold listing's title and link. TCGplayer photo listings: the seller's own title. */
     title?: string;
     url?: string;
+    /** TCGplayer: sold from a custom (photo) listing — the seller's own description, not the plain product. */
+    custom?: boolean;
 }
 /** A live TCGplayer listing (current ask). */
 interface ListingSample {
@@ -72,6 +74,10 @@ interface ListingSample {
     condition: string;
     variant: string;
     quantity: number;
+    /** A custom (photo) listing: the seller's own title/description, which may not be the plain product. */
+    custom?: boolean;
+    /** The seller's own words on a custom listing (title + description, tags stripped). */
+    title?: string;
 }
 /** Per-condition quotes, prefetched so condition changes need no request. */
 type ConditionQuotes = Partial<Record<ConditionCode, PriceQuote>>;
@@ -450,6 +456,10 @@ interface ListingRow {
     condition: string;
     variant: string;
     quantity: number;
+    /** A custom (photo) listing: the seller's own title/description, which may not be the plain product. */
+    custom: boolean;
+    /** The seller's own words on a custom listing (title + description, tags stripped); '' otherwise. */
+    title: string;
 }
 
 declare function normText(s: string): string;
@@ -549,6 +559,32 @@ declare const ASK_DISCOUNT = 0.9;
  * 48 cards had every sub-$1 common capped at a bulk ask before this).
  */
 declare const ASK_TRUST_FROM = 2;
+/**
+ * A seller's own words saying the copy is not the plain product: another
+ * language, a graded slab, a proxy, a signed card. TCGplayer files a custom
+ * (photo) listing under the product the seller picked, so a Spanish copy sits
+ * under the English product with language "English" — only the seller's title
+ * says otherwise ("Mega Charizard X ex 125/094 Spanish see pics", $479.99 under
+ * English copies selling at $640–670; "Mega Char PSA 10", $2,149.99, in the
+ * same list). Applied to custom listings and photo-listing sales only;
+ * standard entries carry the product name.
+ */
+declare const NOT_THE_PRODUCT: RegExp;
+/**
+ * Which live asks may set the floor and the cap.
+ *
+ * Custom listings — a seller's own photos, title and description — are where
+ * the copy that is NOT the product lives (the Spanish Charizard above), so
+ * they never set the floor while a standard listing exists, and never when
+ * their own words name another language. They still show in the asks list.
+ * And a single ask far below both fresh sales and the next ask is a mislisted
+ * or underpriced copy about to vanish, not the market: skipped too.
+ */
+declare function askPool<T extends {
+    price: number;
+    custom?: boolean;
+    title?: string;
+}>(eligible: T[], soldLevel: number | null, soldWeight: number): T[];
 /**
  * Everything one quote is computed from, fetched once and kept apart from
  * the maths so a quote can be replayed from a fixture (tests/pricing).
@@ -658,6 +694,8 @@ interface Assessment {
     askWeight: number;
     /** Cheapest delivered ask (price + shipping), null when under ASK_TRUST_FROM. */
     askCap: number | null;
+    /** How many asks the floor rests on (custom/foreign/lone-underpriced ones excluded). */
+    askCount: number;
     /** `tcg_market` rungs: the day of the bucket the market came from. */
     asOf?: string;
 }
@@ -828,4 +866,4 @@ interface TcgPricing {
 }
 declare function createPricing(config?: PricingConfig): TcgPricing;
 
-export { ALL_CONDITIONS, ASK_DISCOUNT, ASK_TRUST_FROM, type Assessment, CONDITIONS, CONDITION_ID, CONDITION_NAME, type CacheStore, type ConditionCode, type ConditionQuotes, type CrossCheck, type CrossPrice, type CsvCategory, type CsvGroup, type CsvPrice, type CsvProduct, DEFAULT_CHROME_USER_AGENT, DEFAULT_USER_AGENT, type EbayAsks, type EbayListing, FACTOR, GRADERS, GRADES, type Game, type GradedInfo, type GradedQuery, type GroupPrice, type HealthResult, type ListingRow, type ListingSample, type MergedEdition, type PcCardQuery, type PcData, type PcHost, type PcSale, type PcSearchHit, type PriceBasis, type PriceConfidence, type PriceQuote, type PriceRef, type Priced, type PricedCard, type PricingConfig, type ProductMatch, type PsaLookup, type PsaLookupError, type PsaVerify, type QuoteEvidence, type ResolveRequestCard, type ResolveResult, SALE_HALF_LIFE_DAYS, SKU_DEFAULT_COOLDOWN_MS, SKU_DEFAULT_MIN_INTERVAL_MS, STALE_MARKET_AGE_DAYS, type SaleSample, type SearchHit, type SkuMarket, type SkuMarkets, type SkuState, type SubTypePrice, TRUSTED, type TcgPricing, type TierRule, askFloorOf, assembleLadder, assess, assignTier, blendLevels, confidenceOf, corroborationFor, createMemoryCache, createPricing, currentEdition, editionKey, enforceMonotonic, extValue, finish, fromCents, gameForProductLine, gradeLabelFor, imageUrl, ladderFromEvidence, median, mergedEditions, nameSim, normNum, normNumber, normText, numMatch, numberScore, numberTokens, numberTotal, numberingOk, pickSubType, priceFromEvidence, recencyWeight, round2, saleAgeDays, saneMarketPrice, scorePcHit, splitProductName, toCents, weightedMedian, withBuffer, withoutOutliers };
+export { ALL_CONDITIONS, ASK_DISCOUNT, ASK_TRUST_FROM, type Assessment, CONDITIONS, CONDITION_ID, CONDITION_NAME, type CacheStore, type ConditionCode, type ConditionQuotes, type CrossCheck, type CrossPrice, type CsvCategory, type CsvGroup, type CsvPrice, type CsvProduct, DEFAULT_CHROME_USER_AGENT, DEFAULT_USER_AGENT, type EbayAsks, type EbayListing, FACTOR, GRADERS, GRADES, type Game, type GradedInfo, type GradedQuery, type GroupPrice, type HealthResult, type ListingRow, type ListingSample, type MergedEdition, NOT_THE_PRODUCT, type PcCardQuery, type PcData, type PcHost, type PcSale, type PcSearchHit, type PriceBasis, type PriceConfidence, type PriceQuote, type PriceRef, type Priced, type PricedCard, type PricingConfig, type ProductMatch, type PsaLookup, type PsaLookupError, type PsaVerify, type QuoteEvidence, type ResolveRequestCard, type ResolveResult, SALE_HALF_LIFE_DAYS, SKU_DEFAULT_COOLDOWN_MS, SKU_DEFAULT_MIN_INTERVAL_MS, STALE_MARKET_AGE_DAYS, type SaleSample, type SearchHit, type SkuMarket, type SkuMarkets, type SkuState, type SubTypePrice, TRUSTED, type TcgPricing, type TierRule, askFloorOf, askPool, assembleLadder, assess, assignTier, blendLevels, confidenceOf, corroborationFor, createMemoryCache, createPricing, currentEdition, editionKey, enforceMonotonic, extValue, finish, fromCents, gameForProductLine, gradeLabelFor, imageUrl, ladderFromEvidence, median, mergedEditions, nameSim, normNum, normNumber, normText, numMatch, numberScore, numberTokens, numberTotal, numberingOk, pickSubType, priceFromEvidence, recencyWeight, round2, saleAgeDays, saneMarketPrice, scorePcHit, splitProductName, toCents, weightedMedian, withBuffer, withoutOutliers };

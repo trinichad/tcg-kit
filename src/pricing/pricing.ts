@@ -115,6 +115,53 @@ const BAD_SALE_BELOW_ASK = 0.4;
 const DAY_MS = 86_400_000;
 
 /**
+ * A seller's own words saying the copy is not the plain product: another
+ * language, a graded slab, a proxy, a signed card. TCGplayer files a custom
+ * (photo) listing under the product the seller picked, so a Spanish copy sits
+ * under the English product with language "English" — only the seller's title
+ * says otherwise ("Mega Charizard X ex 125/094 Spanish see pics", $479.99 under
+ * English copies selling at $640–670; "Mega Char PSA 10", $2,149.99, in the
+ * same list). Applied to custom listings and photo-listing sales only;
+ * standard entries carry the product name.
+ */
+export const NOT_THE_PRODUCT =
+  /\b(spanish|espa[ñn]ol|japanese|japan|jpn|german|deutsch|french|fran[cç]ais|italian|italiano|portuguese|portugu[eê]s|korean|chinese|thai|indonesian|russian|latam|latin american|slab|slabbed|graded|proxy|signed|autographed?)\b|\b(psa|bgs|cgc|sgc|ace|tag)\s*\d{1,2}(?:\.5)?\b/i;
+
+const notTheProduct = (e: { custom?: boolean; title?: string }): boolean =>
+  e.custom === true && NOT_THE_PRODUCT.test(e.title ?? '');
+
+/**
+ * Which live asks may set the floor and the cap.
+ *
+ * Custom listings — a seller's own photos, title and description — are where
+ * the copy that is NOT the product lives (the Spanish Charizard above), so
+ * they never set the floor while a standard listing exists, and never when
+ * their own words name another language. They still show in the asks list.
+ * And a single ask far below both fresh sales and the next ask is a mislisted
+ * or underpriced copy about to vanish, not the market: skipped too.
+ */
+export function askPool<T extends { price: number; custom?: boolean; title?: string }>(
+  eligible: T[],
+  soldLevel: number | null,
+  soldWeight: number,
+): T[] {
+  const honest = eligible.filter((l) => !notTheProduct(l));
+  const standard = honest.filter((l) => !l.custom);
+  let pool = standard.length ? standard : honest;
+  const byPrice = [...pool].sort((a, b) => a.price - b.price);
+  if (
+    byPrice.length >= 2 &&
+    soldLevel != null &&
+    soldWeight >= 1 &&
+    byPrice[0].price < soldLevel * 0.75 &&
+    byPrice[0].price < byPrice[1].price * 0.8
+  ) {
+    pool = pool.filter((l) => l !== byPrice[0]);
+  }
+  return pool;
+}
+
+/**
  * Everything one quote is computed from, fetched once and kept apart from
  * the maths so a quote can be replayed from a fixture (tests/pricing).
  */
@@ -267,6 +314,8 @@ export interface Assessment {
   askWeight: number;
   /** Cheapest delivered ask (price + shipping), null when under ASK_TRUST_FROM. */
   askCap: number | null;
+  /** How many asks the floor rests on (custom/foreign/lone-underpriced ones excluded). */
+  askCount: number;
   /** `tcg_market` rungs: the day of the bucket the market came from. */
   asOf?: string;
 }
@@ -288,7 +337,9 @@ export function assess(params: PriceRef, ev: QuoteEvidence): Assessment {
   let shown: SaleSample[] = [];
   let asOf: string | undefined;
 
-  const exact = ev.exact.filter((s) => variantOk(s.variant) && s.condition === CONDITION_NAME[condition]);
+  const exact = ev.exact.filter(
+    (s) => variantOk(s.variant) && s.condition === CONDITION_NAME[condition] && !notTheProduct(s),
+  );
 
   if (ev.market && ev.market.market > 0) {
     // ── 0. TCGplayer's own market for this SKU is the sold level ───────────
@@ -322,7 +373,7 @@ export function assess(params: PriceRef, ev: QuoteEvidence): Assessment {
   } else {
     // ── 2. No sales in this exact condition: normalize recent sales to NM
     //    using the condition factors, then scale to the requested condition.
-    const usable = ev.mixed.filter((s) => variantOk(s.variant));
+    const usable = ev.mixed.filter((s) => variantOk(s.variant) && !notTheProduct(s));
     shown = usable;
     const known = usable.filter((s) => CODE_BY_NAME[s.condition]);
     if (known.length >= 2) {
@@ -364,20 +415,23 @@ export function assess(params: PriceRef, ev: QuoteEvidence): Assessment {
   }
 
   // Live asks in this exact condition+printing (cheapest first). Solds say
-  // what buyers paid, asks say the current competition.
-  const listings: ListingSample[] = ev.listings
-    // Drop TCGplayer's 100000 placeholder / troll listings so they can't set the
-    // ask floor or show as a real "current ask".
-    .filter((l) => variantOk(l.variant) && l.condition === CONDITION_NAME[condition] && l.price < 100000)
-    .slice(0, 5);
-  const askFloor = askFloorOf(listings);
+  // what buyers paid, asks say the current competition. The 100000 placeholder
+  // / troll listings are dropped so they can't set the floor or show as a
+  // real "current ask".
+  const eligible = ev.listings.filter(
+    (l) => variantOk(l.variant) && l.condition === CONDITION_NAME[condition] && l.price < 100000,
+  );
+  const listings: ListingSample[] = eligible.slice(0, 5);
+  // The asks the maths may rest on — see askPool.
+  const pool = askPool(eligible, soldLevel, soldWeight);
+  const askFloor = askFloorOf(pool);
   const askWeight =
     askFloor == null
       ? 0
-      : (Math.min(listings.length, ASK_FULL_WEIGHT_AT) / ASK_FULL_WEIGHT_AT) *
+      : (Math.min(pool.length, ASK_FULL_WEIGHT_AT) / ASK_FULL_WEIGHT_AT) *
         Math.min(1, askFloor / ASK_TRUST_FROM);
   // What a customer would actually pay for the cheapest copy, shipping in.
-  const delivered = askFloorOf(listings.map((l) => ({ price: l.price + (l.shipping ?? 0) })));
+  const delivered = askFloorOf(pool.map((l) => ({ price: l.price + (l.shipping ?? 0) })));
   const askCap = delivered != null && delivered >= ASK_TRUST_FROM ? delivered : null;
 
   return {
@@ -398,6 +452,7 @@ export function assess(params: PriceRef, ev: QuoteEvidence): Assessment {
     askFloor,
     askWeight,
     askCap,
+    askCount: pool.length,
     asOf,
   };
 }
@@ -434,14 +489,14 @@ export function finish(a: Assessment, corroboration: number | null): Priced {
   const { productId, condition } = a.params;
   const subType = a.params.subType ?? '';
   let { soldLevel, soldWeight, salesUsed, newestSaleDays, source, askWeight, askCap } = a;
-  const { askFloor, marketPrice, listings } = a;
+  const { askFloor, marketPrice, listings, askCount } = a;
   const fromTcg = a.source === 'tcg_market';
 
   // A single listing far above what the other conditions sell for is one
   // seller's wish (Tyrogue HP: one ask at $4,321 on a $12 card). Ignore it
   // rather than let it lead a rung whose own solds have gone stale.
   let wishNote: string | undefined;
-  if (askFloor != null && listings.length === 1 && corroboration != null && askFloor > corroboration * 3) {
+  if (askFloor != null && askCount === 1 && corroboration != null && askFloor > corroboration * 3) {
     wishNote = `the one live ${condition} ask ($${round2(askFloor)}) is far above what other conditions sell for — ignored`;
     askWeight = 0;
     askCap = null;
